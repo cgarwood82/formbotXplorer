@@ -1,1 +1,0 @@
-# Xplorer_UpdateManager
