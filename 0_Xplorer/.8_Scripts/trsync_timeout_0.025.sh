@@ -3,9 +3,9 @@
 KLIPPER_DIR="/home/biqu/klipper"
 TARGET_FILE="$KLIPPER_DIR/klippy/mcu.py"
 
-if grep -q "TRSYNC_TIMEOUT = 0.050" "$TARGET_FILE"; then
+if grep -q "TRSYNC_TIMEOUT = 0.100" "$TARGET_FILE"; then
   echo "[PATCH] Applying TRSYNC_TIMEOUT = 0.025..."
-  sed -i 's/TRSYNC_TIMEOUT = 0.050/TRSYNC_TIMEOUT = 0.025/' "$TARGET_FILE"
+  sed -i 's/TRSYNC_TIMEOUT = 0.100/TRSYNC_TIMEOUT = 0.025/' "$TARGET_FILE"
 else
   echo "[PATCH] Already applied. Skipping."
 fi
