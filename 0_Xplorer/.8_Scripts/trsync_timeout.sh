@@ -1,6 +1,6 @@
 #!/bin/bash
 
-KLIPPER_DIR="/home/pi/klipper"
+KLIPPER_DIR="/home/biqu/klipper"
 PATCH_FILE="$KLIPPER_DIR_TRSYNC.patch"
 TARGET_FILE="$KLIPPER_DIR/klippy/mcu.py"
 
