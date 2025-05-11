@@ -28,9 +28,11 @@ Everything in this repository can be accessed directly from the Mainsail interfa
 The design files and associated data in this repository are provided **strictly for personal and non-commercial use** under the terms of the  
 **[Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/)** license.
 
-> **⚠️ Commercial use is *not permitted* without prior written consent from Dr. Dan Andrei Marinescu and Formbot.**  
+> **⚠️ Commercial use is *not permitted* without prior written consent from Dr. Dan Andrei Marinescu and Jinhua Xinke 3D Technology Co., Ltd. (Formbot)**  
+> [formbot3d.com](https://formbot3d.com) · [vivedino.com](https://vivedino.com)  
 > This includes (but is not limited to) reproduction, distribution, or integration into commercial products or services.
 
 Unauthorized commercial exploitation may result in legal action.
+
 
 
