@@ -25,6 +25,9 @@ Everything in this repository can be accessed directly from the Mainsail interfa
 
 ## 🚫 License and Usage Notice
 
+![image](https://github.com/user-attachments/assets/96837241-fcdd-4e59-846a-e6b357f3b452)
+
+
 The design files and associated data in this repository are provided **strictly for personal and non-commercial use** under the terms of the  
 **[Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/)** license.
 
