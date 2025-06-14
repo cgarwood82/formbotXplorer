@@ -1,0 +1,1 @@
+rm /home/biqu/printer_data/gcodes/plr -rf
