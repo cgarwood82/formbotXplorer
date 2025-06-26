@@ -23,16 +23,48 @@ if [ -z "$first_layer_height" ] || [ -z "$layer_height" ]; then
   exit 1
 fi
 
-# Remove any previous entries
-sed -i '/^first_layer_height *=/d' "$CONFIG_FILE"
-sed -i '/^layer_height *=/d' "$CONFIG_FILE"
+# Function to update and verify config
+update_config_file() {
+  # Remove previous entries
+  sed -i '/^first_layer_height *=/d' "$CONFIG_FILE"
+  sed -i '/^layer_height *=/d' "$CONFIG_FILE"
 
-# Append new values
-echo "first_layer_height = $first_layer_height" >> "$CONFIG_FILE"
-echo "layer_height = $layer_height" >> "$CONFIG_FILE"
+  # Append new values
+  echo "first_layer_height = $first_layer_height" >> "$CONFIG_FILE"
+  echo "layer_height = $layer_height" >> "$CONFIG_FILE"
+}
 
-# Output for user
-echo "Extracted from: $last_file"
-echo "Saved to variables.cfg:"
-echo "  first_layer_height = $first_layer_height"
-echo "  layer_height = $layer_height"
+# Function to verify values in config
+verify_config_file() {
+  grep -q "^first_layer_height *= *$first_layer_height" "$CONFIG_FILE" && \
+  grep -q "^layer_height *= *$layer_height" "$CONFIG_FILE"
+}
+
+# Retry loop
+MAX_RETRIES=5
+SLEEP_SECONDS=1
+attempt=1
+success=0
+
+while [ $attempt -le $MAX_RETRIES ]; do
+  update_config_file
+
+  if verify_config_file; then
+    success=1
+    break
+  fi
+
+  echo "Attempt $attempt failed to verify saved values. Retrying..."
+  sleep $SLEEP_SECONDS
+  attempt=$((attempt + 1))
+done
+
+if [ "$success" -eq 1 ]; then
+  echo "Extracted from: $last_file"
+  echo "Saved to variables.cfg:"
+  echo "  first_layer_height = $first_layer_height"
+  echo "  layer_height = $layer_height"
+else
+  echo "Error: first_layer_height and layer_height could not be extracted after $MAX_RETRIES attempts."
+  exit 1
+fi
