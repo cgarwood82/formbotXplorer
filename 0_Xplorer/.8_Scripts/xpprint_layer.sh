@@ -13,9 +13,9 @@ if [ ! -f "$filepath" ]; then
   exit 1
 fi
 
-# Extract precise lines
-first_layer_height=$(grep -E '^;[ ]*first_layer_height[ ]*=' "$filepath" | head -1 | sed -n 's/^;[ ]*first_layer_height[ ]*=[ ]*\(.*\)/\1/p')
-layer_height=$(grep -E '^;[ ]*layer_height[ ]*=' "$filepath" | head -1 | sed -n 's/^;[ ]*layer_height[ ]*=[ ]*\(.*\)/\1/p')
+# Extract the last matching layer height metadata from the G-code file
+first_layer_height=$(grep -E '^;[ ]*first_layer_height[ ]*=' "$filepath" | tail -1 | sed -n 's/^;[ ]*first_layer_height[ ]*=[ ]*\(.*\)/\1/p')
+layer_height=$(grep -E '^;[ ]*layer_height[ ]*=' "$filepath" | tail -1 | sed -n 's/^;[ ]*layer_height[ ]*=[ ]*\(.*\)/\1/p')
 
 # Validate extracted values
 if [ -z "$first_layer_height" ] || [ -z "$layer_height" ]; then
@@ -31,6 +31,7 @@ sed -i '/^layer_height *=/d' "$CONFIG_FILE"
 echo "first_layer_height = $first_layer_height" >> "$CONFIG_FILE"
 echo "layer_height = $layer_height" >> "$CONFIG_FILE"
 
+# Output for user
 echo "Extracted from: $last_file"
 echo "Saved to variables.cfg:"
 echo "  first_layer_height = $first_layer_height"
