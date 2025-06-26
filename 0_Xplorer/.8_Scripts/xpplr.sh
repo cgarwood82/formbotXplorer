@@ -1,11 +1,10 @@
 #!/bin/bash
 
-# Extract Z height and file info for resume processing, preserving thumbnail block
+# Extract Z height and file info for resume processing
 
 CONFIG_FILE="/home/biqu/printer_data/config/variables.cfg"
 PLR_DIR="/home/biqu/printer_data/gcodes/plr/"
 TMP_FILE="/home/biqu/plrtmpA.$$"
-TMP_THUMB="/home/biqu/plrthumb.$$"
 TMP_RESUME="/home/biqu/plrresume.$$"
 
 mkdir -p "$PLR_DIR"
@@ -35,25 +34,21 @@ fi
 
 cp "$filepath" "$TMP_FILE"
 
-# Preserve thumbnail block if it exists
-awk '/; THUMBNAIL_BLOCK_START/,/; THUMBNAIL_BLOCK_END/' "$TMP_FILE" > "$TMP_THUMB"
-
-# Slice from ;Z:<value> line onward
-Z_PATTERN=$(printf ";Z:%.1f" "$resume_z")
-awk -v z="$Z_PATTERN" '
-  found { print }
-  !found && index($0, z) { found=1; print }
+# Slice from the exact ;Z:<resume_z> line onward
+awk -v z=";Z:$resume_z" '
+  $0 == z { found = 1 }
+  found
 ' "$TMP_FILE" > "$TMP_RESUME"
 
-# Combine
-cat "$TMP_THUMB" "$TMP_RESUME" > "${PLR_DIR}/${last_file}"
+# Output to final file
+cp "$TMP_RESUME" "${PLR_DIR}/${last_file}"
 
 # Clean up
-rm -f "$TMP_FILE" "$TMP_THUMB" "$TMP_RESUME"
+rm -f "$TMP_FILE" "$TMP_RESUME"
 
 # Confirm
 if [ ! -s "${PLR_DIR}/${last_file}" ]; then
-  echo "Warning: Output is empty. Possibly no matching Z pattern."
+  echo "Warning: Output is empty. Possibly no matching Z pattern for: ;Z:$resume_z"
 else
-  echo "Resume G-code with thumbnail saved to: ${PLR_DIR}/${last_file}"
+  echo "Resume G-code saved to: ${PLR_DIR}/${last_file}"
 fi
