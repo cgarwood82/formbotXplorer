@@ -38,4 +38,10 @@ The design files and associated data in this repository are provided **strictly 
 Unauthorized commercial exploitation may result in legal action.
 
 
+---
+
+### ☕ Like this project?
+
+Support Dan on [coff.ee/Dan_3dp](https://coff.ee/Dan_3dp) – every coffee helps keep the printers running smoothly! 😊
+
 
