@@ -56,8 +56,3 @@ sleep 5
 reboot
 
 echo "Firmware flashing complete."
-
-
-
-
-
