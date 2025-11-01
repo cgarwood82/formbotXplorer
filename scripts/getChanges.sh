@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Sync selected Klipper config subfolders into this repository working tree.
+# Sync Klipper config into repo under ./config/ for easy backup.
+# - Copies root-level *.cfg and *.conf
+# - Copies all subdirectories except 0_Xplorer (managed by Moonraker)
 # Defaults are safe and idempotent. Requires: rsync, git (optional).
 
 set -euo pipefail
@@ -11,13 +13,10 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 
 # Source (printer) and destination (repo) roots
 KLIPPERCONFIG="${KLIPPERCONFIG:-$HOME/printer_data/config}"
+# Destination inside this repo for configs
+REPO_CONFIG_DIR="${REPO_CONFIG_DIR:-$PROJECT_ROOT/config}"
+# Repo root (used for optional git commit)
 VERSIONCONTROLHOME="${VERSIONCONTROLHOME:-$PROJECT_ROOT}"
-
-# Directories (relative to KLIPPERCONFIG) to sync into repo root
-SYNC_DIRS=(
-  "01__User_Custom__CFG"
-  "02__Boards_Serials"
-)
 
 # Exclusions (relative patterns). Add as needed.
 EXCLUDES=(
@@ -26,6 +25,7 @@ EXCLUDES=(
   "*.swp"
   "*~"
   "__pycache__/"
+  "0_Xplorer/"   # explicitly omit managed folder
 )
 
 # Options
@@ -47,8 +47,9 @@ Options:
   -h, --help      Show this help
 
 Env overrides:
-  KLIPPERCONFIG   Source root (default: $HOME/printer_data/config)
-  VERSIONCONTROLHOME  Repo root (default: project root)
+  KLIPPERCONFIG       Source root (default: $HOME/printer_data/config)
+  REPO_CONFIG_DIR     Destination directory in repo (default: ./config)
+  VERSIONCONTROLHOME  Repo root for git operations (default: project root)
 USAGE
 }
 
@@ -74,52 +75,64 @@ require_cmd rsync
 
 # Validate source and destination roots
 [[ -d "$KLIPPERCONFIG" ]] || fail "Source directory not found: $KLIPPERCONFIG"
+mkdir -p "$REPO_CONFIG_DIR"
 [[ -d "$VERSIONCONTROLHOME" ]] || fail "Destination (repo) not found: $VERSIONCONTROLHOME"
 
-# Build rsync args
-RS_ARGS=("-a" "--human-readable" "--info=stats1,NAME")
-[[ $VERBOSE -eq 1 ]] && RS_ARGS+=("-v")
-[[ $DRY_RUN -eq 1 ]] && RS_ARGS+=("-n")
-[[ -n "${DELETE_FLAG}" ]] && RS_ARGS+=("--delete")
+# Build base rsync args
+RS_BASE_ARGS=("-a" "--human-readable" "--info=stats1,NAME")
+[[ $VERBOSE -eq 1 ]] && RS_BASE_ARGS+=("-v")
+[[ $DRY_RUN -eq 1 ]] && RS_BASE_ARGS+=("-n")
+[[ -n "${DELETE_FLAG}" ]] && RS_DELETE_ARGS=("--delete") || RS_DELETE_ARGS=()
 
+# Add common excludes to arg sets
+COMMON_EXCLUDES=()
 for ex in "${EXCLUDES[@]}"; do
-  RS_ARGS+=("--exclude=$ex")
+  COMMON_EXCLUDES+=("--exclude=$ex")
 done
 
-log "Source:      $KLIPPERCONFIG"
-log "Destination: $VERSIONCONTROLHOME"
-log "Options:     ${RS_ARGS[*]}"
+log "Source:        $KLIPPERCONFIG"
+log "Destination:   $REPO_CONFIG_DIR"
+log "Options:       ${RS_BASE_ARGS[*]} ${RS_DELETE_ARGS[*]} ${COMMON_EXCLUDES[*]}"
 
 changed_any=0
-for rel in "${SYNC_DIRS[@]}"; do
-  src="$KLIPPERCONFIG/$rel/"        # trailing slash: copy contents
-  dst="$VERSIONCONTROLHOME/$rel/"   # mirror directory layout
 
-  if [[ ! -d "$src" ]]; then
-    log "Skip (missing): $src"
-    continue
+# 1) Sync root-level *.cfg and *.conf into REPO_CONFIG_DIR
+log "Syncing root-level *.cfg and *.conf"
+ROOT_ARGS=("${RS_BASE_ARGS[@]}" "${RS_DELETE_ARGS[@]}" "--prune-empty-dirs")
+# include only cfg/conf at root and exclude everything else
+ROOT_ARGS+=("--include=*.cfg" "--include=*.conf" "--exclude=*")
+ROOT_ARGS+=("${COMMON_EXCLUDES[@]}")
+if output=$(rsync "${ROOT_ARGS[@]}" "$KLIPPERCONFIG/" "$REPO_CONFIG_DIR/"); then
+  if [[ -n "$output" ]]; then
+    changed_any=1
+    echo "$output"
+  else
+    log "No root-level cfg/conf changes"
   fi
-  mkdir -p "$dst"
+fi
 
-  log "Syncing: $rel"
-  # Capture rsync output to decide if anything changed
-  if output=$(rsync "${RS_ARGS[@]}" --prune-empty-dirs "$src" "$dst"); then
-    if [[ -n "$output" ]]; then
-      changed_any=1
-      echo "$output"
-    else
-      log "No changes in $rel"
-    fi
+# 2) Sync all subdirectories except 0_Xplorer into REPO_CONFIG_DIR/<dir>
+log "Syncing subdirectories (excluding 0_Xplorer)"
+DIR_ARGS=("${RS_BASE_ARGS[@]}" "${RS_DELETE_ARGS[@]}" "--prune-empty-dirs")
+# exclude managed folder and root cfg/conf to avoid duplication
+DIR_ARGS+=("--exclude=0_Xplorer/" "--exclude=*.cfg" "--exclude=*.conf")
+DIR_ARGS+=("${COMMON_EXCLUDES[@]}")
+if output=$(rsync "${DIR_ARGS[@]}" "$KLIPPERCONFIG/" "$REPO_CONFIG_DIR/"); then
+  if [[ -n "$output" ]]; then
+    changed_any=1
+    echo "$output"
+  else
+    log "No directory changes"
   fi
-done
+fi
 
-# Optional git commit
+# Optional git commit (run from repo root)
 if [[ $AUTO_COMMIT -eq 1 && $DRY_RUN -eq 0 ]]; then
   if command -v git >/dev/null 2>&1; then
     (cd "$VERSIONCONTROLHOME" && \
       git add -A && \
       if ! git diff --cached --quiet; then
-        msg="chore(getChanges): sync from printer $(date '+%Y-%m-%d %H:%M:%S')"
+        msg="chore(getChanges): sync printer config -> ./config $(date '+%Y-%m-%d %H:%M:%S')"
         git commit -m "$msg"
         log "Committed changes: $msg"
       else

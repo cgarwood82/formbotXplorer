@@ -1,25 +1,66 @@
 # Overview
 This repo serves as a landing place for files that aren't in the main update manager
 for the xplorer. Some of these files may be from the image, some may be from custom
-configs that I later generate, but they aren't part of the update process. 
+configs that I later generate, but they aren't part of the update process.
+
+This repository is also my primary backup for the printer's Klipper configuration.
+All synced configuration files now live under the top-level `config/` directory.
 
 ## Repo Structure
 
-### NotMine
-NotMine is currently for files and folders discovered that aren't part of update
-manager. Ideally these would by synced with the upstream, but currently that isn't
-possible. So as I discover them, I'll version them here for distribution. Licenes
-are unknown currently, but the project is generally managed in the open. Will 
-fix any licensing issues that are in violation with a git issue!
+### config/
+Contains a mirror of `$HOME/printer_data/config` from the printer, with some rules:
+- Root-level `*.cfg` and `*.conf` files (e.g., `printer.cfg`, `moonraker.conf`) are copied into `config/`.
+- All subdirectories under `$HOME/printer_data/config` are mirrored into `config/`,
+  except `0_Xplorer/` which is managed by Moonraker's update manager and versioned elsewhere.
+- Examples (your actual set may vary by printer):
+  - `config/01__User_Custom__CFG/`
+  - `config/02__Boards_Serials/`
+  - Other directories like `macros/`, etc., if present on the printer
 
-### scripts
-Scripts are for any scripts that are used to manage files in this repo as well as 
-manage backups of files. This is not part fo the base image of the project. 
+### NotMine/
+Holds files that are not managed through the main update manager but are useful to
+install on the printer.
+- `NotMine/xplorer.py`: A Klipper module loader used by Xplorer.
+- `NotMine/variables.cfg`: A configuration file for the module(s).
+- `scripts/install_notmine.sh` installs these into the appropriate printer locations and
+  backs up prior versions into `NotMine/backup/` when replacing non-empty, different files.
 
-### 01__User_Custom_CFG
-Folder for custom things I build that I want included in klipper. This is part of
-the base image of the project. 
+### scripts/
+Host maintenance scripts for this repo:
+- `scripts/getChanges.sh`: Syncs printer configuration into `./config/` using `rsync`.
+  - Safe defaults, supports `--dry-run`, `--no-delete`, `--commit`, and `--verbose`.
+  - Excludes `0_Xplorer/` automatically.
+- `scripts/install_notmine.sh`: Installs `NotMine/xplorer.py` and `NotMine/variables.cfg` on the printer with backups.
 
-### 02__Boards_Serials
-Folder for managing serial numbers for boards used in the project. This is part of
-the base image of the project. 
+## Using getChanges.sh
+- Normal sync (mirrors deletions by default):
+  ```bash
+  bash scripts/getChanges.sh
+  ```
+- Preview changes without modifying files:
+  ```bash
+  bash scripts/getChanges.sh --dry-run
+  ```
+- Avoid deleting files that were removed on the printer:
+  ```bash
+  bash scripts/getChanges.sh --no-delete
+  ```
+- Verbose output and auto-commit the results:
+  ```bash
+  bash scripts/getChanges.sh --verbose --commit
+  ```
+
+### Environment overrides
+You can customize source/destination paths:
+```bash
+KLIPPERCONFIG="$HOME/printer_data/config" \
+REPO_CONFIG_DIR="/path/to/this/repo/config" \
+VERSIONCONTROLHOME="/path/to/this/repo" \
+bash scripts/getChanges.sh
+```
+
+## Migration note
+Older versions of this repo stored some configuration folders at the top level
+(e.g., `01__User_Custom__CFG/`, `02__Boards_Serials/`). These now live under `config/`
+with the same names (e.g., `config/01__User_Custom__CFG/`).
