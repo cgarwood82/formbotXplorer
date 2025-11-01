@@ -31,7 +31,11 @@ Host maintenance scripts for this repo:
 - `scripts/getChanges.sh`: Syncs printer configuration into `./config/` using `rsync`.
   - Safe defaults, supports `--dry-run`, `--no-delete`, `--commit`, and `--verbose`.
   - Excludes `0_Xplorer/` automatically.
-- `scripts/install_notmine.sh`: Installs `NotMine/xplorer.py` and `NotMine/variables.cfg` on the printer with backups.
+- `scripts/deploy_to_printer.sh`: Deploys changes from this repo to the printer.
+  - Targets: `--notmine` (NotMine artifacts), `--config` (repo `./config`), or `--all` (default).
+  - Safety: `--dry-run`, `--no-delete`, `--verbose`, `--no-backup`, `--confirm`.
+  - Backups: overwritten/deleted config files are backed up under `$HOME/printer_data/config/.deploy_backups/<timestamp>/` by default; NotMine backups go to `NotMine/backup/`.
+- `scripts/install_notmine.sh`: Back-compat wrapper that now forwards to `deploy_to_printer.sh --notmine`. Prefer using `deploy_to_printer.sh` directly.
 
 ## Using getChanges.sh
 - Normal sync (mirrors deletions by default):
