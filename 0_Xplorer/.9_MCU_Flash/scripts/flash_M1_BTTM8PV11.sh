@@ -32,10 +32,10 @@ if [ -z "$SERIAL_ID" ]; then
 fi
 
 # Take the config suited for mainboard
-cp -f $HOME/printer_data/config/0_Xplorer/.9_MCU_Flash/MCU_config/BTT_Manta_M8P_V1.1/.config $HOME/klipper/
+cp -f "$HOME"/printer_data/config/0_Xplorer/.9_MCU_Flash/MCU_config/BTT_Manta_M8P_V1.1/.config "$HOME"/klipper/
 
 # Go to the Klipper directory
-cd $HOME/klipper/
+cd "$HOME"/klipper/ || exit
 
 # Delete the old config and make a new one
 make olddefconfig
