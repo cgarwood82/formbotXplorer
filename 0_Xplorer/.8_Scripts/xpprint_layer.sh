@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Paths
-CONFIG_FILE="/home/biqu/printer_data/config/variables.cfg"
+CONFIG_FILE="$HOME/printer_data/config/variables.cfg"
 
 # Extract file path and name from variables.cfg
 filepath=$(sed -n "s/.*filepath *= *'\([^']*\)'.*/\1/p" "$CONFIG_FILE")

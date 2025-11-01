@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the path to the password file
-PASSWORD_FILE="/home/biqu/printer_data/config/.system_pass.txt"
+PASSWORD_FILE="$HOME/printer_data/config/.system_pass.txt"
 
 # Check if the password file exists
 if [ ! -f "$PASSWORD_FILE" ]; then
@@ -13,8 +13,8 @@ fi
 PASSWORD=$(cat "$PASSWORD_FILE")
 
 # Define the path to the serial ID of MCU
-SERIAL_FILE="/home/biqu/printer_data/config/02__Boards_Serials/Mainboard_serial.cfg"
-CONFIG_FILE="/home/biqu/printer_data/config/0_Xplorer/.9_MCU_Flash/MCU_config/BTT_Manta_M8P_V2.0/.config"
+SERIAL_FILE="$HOME/printer_data/config/02__Boards_Serials/Mainboard_serial.cfg"
+CONFIG_FILE="$HOME/printer_data/config/0_Xplorer/.9_MCU_Flash/MCU_config/BTT_Manta_M8P_V2.0/.config"
 
 # Extract the serial ID from the serial file
 SERIAL_ID=$(grep "serial:" "$SERIAL_FILE" | awk '{print $2}')
@@ -32,10 +32,10 @@ if [ -z "$SERIAL_ID" ]; then
 fi
 
 # Take the config suited for mainboard
-cp -f /home/biqu/printer_data/config/0_Xplorer/.9_MCU_Flash/MCU_config/BTT_Manta_M8P_V2.0/.config /home/biqu/klipper/
+cp -f $HOME/printer_data/config/0_Xplorer/.9_MCU_Flash/MCU_config/BTT_Manta_M8P_V2.0/.config $HOME/klipper/
 
 # Go to the Klipper directory
-cd /home/biqu/klipper/
+cd $HOME/klipper/
 
 # Delete the old config and make a new one
 make olddefconfig
