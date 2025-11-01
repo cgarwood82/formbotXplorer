@@ -2,12 +2,15 @@ import sys
 import os
 import importlib
 import shutil
+from pathlib import Path
 
-MODULES_PATH = "/home/biqu/printer_data/config/0_Xplorer/.7_XP_modules"
-EXTRAS_PATH = "/home/biqu/klipper/klippy/extras"
+HOME_DIR = Path.home()
 
-if MODULES_PATH not in sys.path:
-    sys.path.insert(0, MODULES_PATH)
+MODULES_PATH = HOME_DIR / "printer_data/config/0_Xplorer/.7_XP_modules"
+EXTRAS_PATH = HOME_DIR / "klipper/klippy/extras"
+
+if str(MODULES_PATH) not in sys.path:
+    sys.path.insert(0, str(MODULES_PATH))
 
 class XplorerMain:
     def __init__(self, config):
