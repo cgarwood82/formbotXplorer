@@ -117,7 +117,7 @@ DIR_ARGS=("${RS_BASE_ARGS[@]}" "${RS_DELETE_ARGS[@]}" "--prune-empty-dirs")
 # Only include top-level directories and their contents;
 # exclude root-level files to avoid duplication with step (1).
 # Explicitly exclude the managed 0_Xplorer folder.
-DIR_ARGS+=("--exclude=/0_Xplorer/" "--include=/*/" "--exclude=/*")
+DIR_ARGS+=("--exclude=/0_Xplorer/" "--include=/*/" "--include=/*/**"  "--exclude=/*")
 DIR_ARGS+=("${COMMON_EXCLUDES[@]}")
 if output=$(rsync "${DIR_ARGS[@]}" "$KLIPPERCONFIG/" "$REPO_CONFIG_DIR/"); then
   if [[ -n "$output" ]]; then
