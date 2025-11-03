@@ -37,6 +37,11 @@ DELETE_FLAG=1           # 1=mirror deletions for config
 VERBOSE=0
 NO_BACKUP=0
 CONFIRM=0
+GIT_PULL=1              # 1=perform git pull before deploying
+GIT_REMOTE=""
+GIT_BRANCH=""
+ALLOW_DIRTY=0
+AUTO_STASH=0
 
 # Exclusions for config push
 EXCLUDES=(
@@ -59,7 +64,13 @@ Options:
   --verbose        Verbose output
   --no-backup      Do not create backups prior to overwrites/deletions
   --backup-dir DIR Backup directory on printer for config deploy (default: $DEFAULT_CONFIG_BACKUP_DIR)
-  --confirm        Ask for confirmation before performing non-dry-run actions
+  --confirm        Ask for confirmation before performing actions (also used to auto-approve preflight)
+  --no-git         Skip git checks and pulling before deployment
+  --git-pull       Force running git pull preflight (default behavior)
+  --git-remote R   Use remote R for pull (default: origin if present)
+  --git-branch B   Use branch B for pull (default: current branch)
+  --allow-dirty    Proceed even if the working tree has uncommitted changes
+  --stash          Auto-stash uncommitted changes before pull and pop after
   -h, --help       Show this help
 
 Env overrides:
@@ -74,25 +85,35 @@ USAGE
 }
 
 # --- Arg parsing -------------------------------------------------------------
-if [[ $# -eq 0 ]]; then
-  DO_NOTMINE=1; DO_CONFIG=1
-fi
+# Track if a target was explicitly selected; default to --all if none.
+TARGET_SET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --all) DO_NOTMINE=1; DO_CONFIG=1; shift ;;
-    --notmine) DO_NOTMINE=1; DO_CONFIG=0; shift ;;
-    --config) DO_NOTMINE=0; DO_CONFIG=1; shift ;;
+    --all) DO_NOTMINE=1; DO_CONFIG=1; TARGET_SET=1; shift ;;
+    --notmine) DO_NOTMINE=1; DO_CONFIG=0; TARGET_SET=1; shift ;;
+    --config) DO_NOTMINE=0; DO_CONFIG=1; TARGET_SET=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-delete) DELETE_FLAG=0; shift ;;
     --verbose) VERBOSE=1; shift ;;
     --no-backup) NO_BACKUP=1; shift ;;
     --backup-dir) CONFIG_BACKUP_DIR="$2"; shift 2 ;;
     --confirm) CONFIRM=1; shift ;;
+    --no-git) GIT_PULL=0; shift ;;
+    --git-pull) GIT_PULL=1; shift ;;
+    --git-remote) GIT_REMOTE="$2"; shift 2 ;;
+    --git-branch) GIT_BRANCH="$2"; shift 2 ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
+    --stash) AUTO_STASH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+if [[ $TARGET_SET -eq 0 ]]; then
+  # No explicit target provided; default to deploying both NotMine and config
+  DO_NOTMINE=1; DO_CONFIG=1
+fi
 
 # --- Helpers -----------------------------------------------------------------
 log() { echo -e "[deploy] $*"; }
@@ -111,6 +132,90 @@ confirm_or_exit() {
     y|Y|yes|YES) return 0 ;;
     *) log "Cancelled."; exit 0 ;;
   esac
+}
+
+confirm_with_message() {
+  # $1: message to display before confirmation
+  # Returns 0 to proceed, exits 0 otherwise
+  if [[ $DRY_RUN -eq 1 ]]; then
+    return 0
+  fi
+  echo -e "$1"
+  read -r -p "Proceed? [y/N] " reply
+  case "$reply" in
+    y|Y|yes|YES) return 0 ;;
+    *) log "Cancelled."; exit 0 ;;
+  esac
+}
+
+# --- Git preflight -----------------------------------------------------------
+STASH_MADE=0
+GIT_HEAD_BEFORE=""
+
+is_git_repo() { git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
+
+choose_git_remote() {
+  if [[ -n "$GIT_REMOTE" ]]; then echo "$GIT_REMOTE"; return; fi
+  local def
+  def=$(git -C "$PROJECT_ROOT" remote 2>/dev/null | head -n1)
+  if git -C "$PROJECT_ROOT" remote | grep -q "^origin$"; then
+    echo origin
+  else
+    echo "$def"
+  fi
+}
+
+current_branch() { git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null; }
+
+git_preflight() {
+  [[ $GIT_PULL -eq 1 ]] || return 0
+  if ! is_git_repo; then
+    warn "Project is not a Git repo; skipping git pull."
+    return 0
+  fi
+
+  require_cmd git
+
+  local branch remote
+  branch=${GIT_BRANCH:-$(current_branch)}
+  remote=$(choose_git_remote)
+
+  if [[ -z "$remote" || -z "$branch" ]]; then
+    warn "Unable to determine git remote/branch; skipping git pull."
+    return 0
+  fi
+
+  log "Git: branch=$branch remote=$remote (preflight)"
+
+  # Check working tree cleanliness
+  if ! git -C "$PROJECT_ROOT" diff --quiet || ! git -C "$PROJECT_ROOT" diff --cached --quiet; then
+    if [[ $AUTO_STASH -eq 1 && $DRY_RUN -eq 0 ]]; then
+      log "Git: auto-stashing local changes"
+      git -C "$PROJECT_ROOT" stash push -u -k -m "deploy_to_printer autostash $TIMESTAMP" >/dev/null || true
+      STASH_MADE=1
+    elif [[ $ALLOW_DIRTY -eq 1 ]]; then
+      warn "Git: proceeding with dirty working tree (per --allow-dirty)."
+    else
+      fail "Git working tree has uncommitted changes. Use --allow-dirty or --stash to proceed."
+    fi
+  fi
+
+  # Fetch and fast-forward pull
+  git -C "$PROJECT_ROOT" fetch "$remote" "$branch" || fail "git fetch failed."
+
+  # Show ahead/behind
+  local upstream="$remote/$branch"
+  if git -C "$PROJECT_ROOT" rev-parse "$upstream" >/dev/null 2>&1; then
+    local counts
+    counts=$(git -C "$PROJECT_ROOT" rev-list --left-right --count "$branch...$upstream" 2>/dev/null || echo "0	0")
+    log "Git: ahead/behind (local...remote): $counts"
+  fi
+
+  if ! git -C "$PROJECT_ROOT" pull --ff-only "$remote" "$branch"; then
+    fail "git pull failed (non fast-forward?). Resolve and retry or run with --no-git."
+  fi
+
+  GIT_HEAD_BEFORE=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "")
 }
 
 # rsync convenience
@@ -222,6 +327,45 @@ deploy_config() {
   log "  delete: $([[ $DELETE_FLAG -eq 1 ]] && echo yes || echo no)  backups: $([[ $NO_BACKUP -eq 0 ]] && echo yes || echo no)"
   log "  backup dir: $([[ $NO_BACKUP -eq 0 ]] && echo "$CONFIG_BACKUP_DIR" || echo "(disabled)")"
 
+  # Safety: avoid destructive delete when source is empty unless explicitly confirmed
+  if [[ $DELETE_FLAG -eq 1 && $DRY_RUN -eq 0 && $CONFIRM -eq 0 ]]; then
+    if ! find "$REPO_CONFIG_DIR" -mindepth 1 -not -path '*/.git/*' -print -quit | grep -q .; then
+      fail "Repo config directory appears empty; refusing to run rsync with --delete without --confirm. Re-run with --confirm or use --no-delete."
+    fi
+  fi
+
+  # Preflight: run rsync dry-run to summarize actions (overwrites/creates/deletes)
+  local -a preflight_args=("${args[@]}")
+  # Ensure dry-run and itemized changes are on for preflight
+  preflight_args+=("-n" "--itemize-changes")
+  local preflight_out
+  preflight_out=$(rsync "${preflight_args[@]}" "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/" || true)
+
+  # Summarize changes
+  local deletes updates total
+  deletes=$(echo "$preflight_out" | grep -c '^\*deleting ' || true)
+  # Count non-empty lines that look like itemized changes (start with [<>cdhs.]) excluding *deleting
+  updates=$(echo "$preflight_out" | grep -E '^[<>cdhs\.].' | grep -v '^\*deleting ' | wc -l | tr -d ' ')
+  total=$((deletes + updates))
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
+    # Show details in dry-run
+    if [[ -n "$preflight_out" ]]; then
+      echo "$preflight_out"
+    fi
+    return 0
+  fi
+
+  if (( total > 0 )); then
+    log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
+    if [[ $CONFIRM -eq 0 ]]; then
+      confirm_with_message "About to apply the above changes to $KLIPPERCONFIG. Use --no-delete to avoid deletions or --dry-run to preview."
+    fi
+  else
+    log "Preflight summary: no changes needed."
+  fi
+
   # Push everything under repo config to the printer config
   rsync "${args[@]}" "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/"
 
@@ -241,6 +385,11 @@ log "Extras:        $EXTRAS_DIR"
 log "Printer config:$KLIPPERCONFIG"
 log "Dry-run:       $([[ $DRY_RUN -eq 1 ]] && echo yes || echo no)"
 log "Verbose:       $([[ $VERBOSE -eq 1 ]] && echo yes || echo no)"
+log "Targets:       NotMine=$([[ $DO_NOTMINE -eq 1 ]] && echo yes || echo no), Config=$([[ $DO_CONFIG -eq 1 ]] && echo yes || echo no)"
+log "Git preflight: $([[ $GIT_PULL -eq 1 ]] && echo enabled || echo disabled)"
+
+# Run git preflight early to ensure repo is up-to-date before computing any preflight diffs
+git_preflight
 
 confirm_or_exit
 
@@ -256,6 +405,12 @@ if [[ $DO_CONFIG -eq 1 ]]; then
   log "--- Deploy config ---"
   deploy_config
   changed_any=1
+fi
+
+# Pop stash if we created one
+if [[ $STASH_MADE -eq 1 && $DRY_RUN -eq 0 ]]; then
+  log "Git: restoring stashed changes"
+  git -C "$PROJECT_ROOT" stash pop -q || warn "Git: failed to pop stash; your changes remain stashed."
 fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
