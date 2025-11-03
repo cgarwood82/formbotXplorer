@@ -34,6 +34,8 @@ Host maintenance scripts for this repo:
 - `scripts/deploy_to_printer.sh`: Deploys changes from this repo to the printer.
   - Targets: `--notmine` (NotMine artifacts), `--config` (repo `./config`), or `--all` (default).
   - Safety: `--dry-run`, `--no-delete`, `--verbose`, `--no-backup`, `--confirm`.
+  - Git preflight (default ON): ensures you deploy the latest changes by running `git fetch` + `git pull --ff-only` on the current branch. Flags: `--no-git` (skip), `--git-pull` (force on), `--git-remote <R>`, `--git-branch <B>`, `--allow-dirty`, `--stash`.
+  - Preflight summary: before applying config, the script runs an rsync dry-run and summarizes `updates` and `deletions`; it will prompt for confirmation unless you passed `--confirm`.
   - Backups: overwritten/deleted config files are backed up under `$HOME/printer_data/config/.deploy_backups/<timestamp>/` by default; NotMine backups go to `NotMine/backup/`.
 - `scripts/install_notmine.sh`: Back-compat wrapper that now forwards to `deploy_to_printer.sh --notmine`. Prefer using `deploy_to_printer.sh` directly.
 
