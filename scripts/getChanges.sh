@@ -114,8 +114,10 @@ fi
 # 2) Sync all subdirectories except 0_Xplorer into REPO_CONFIG_DIR/<dir>
 log "Syncing subdirectories (excluding 0_Xplorer)"
 DIR_ARGS=("${RS_BASE_ARGS[@]}" "${RS_DELETE_ARGS[@]}" "--prune-empty-dirs")
-# exclude managed folder and root cfg/conf to avoid duplication
-DIR_ARGS+=("--exclude=0_Xplorer/" "--exclude=*.cfg" "--exclude=*.conf")
+# Only include top-level directories and their contents;
+# exclude root-level files to avoid duplication with step (1).
+# Explicitly exclude the managed 0_Xplorer folder.
+DIR_ARGS+=("--exclude=/0_Xplorer/" "--include=/*/" "--exclude=/*")
 DIR_ARGS+=("${COMMON_EXCLUDES[@]}")
 if output=$(rsync "${DIR_ARGS[@]}" "$KLIPPERCONFIG/" "$REPO_CONFIG_DIR/"); then
   if [[ -n "$output" ]]; then
