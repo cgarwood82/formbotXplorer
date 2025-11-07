@@ -125,21 +125,19 @@ resolve_includes() {
 extract_mcus_from_files() {
   local f
   for f in "$@"; do
-    awk -v src="$f" '
-      BEGIN{insec=0}
-      /^\s*\[/ {insec=1}
-      insec && /^\s*\[mcu(\s|\])/ {
-        name="mcu"
-        if ($0 ~ /\[mcu[[:space:]]+/) {
-          sub(/^\[mcu[[:space:]]+/, "", $0)
-          sub(/\].*$/, "", $0)
-          name=$0
-        }
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-        printf("%s|%s\n", name, src)
-        insec=0
-      }
-    ' "$f"
+    # Use sed to find lines beginning with [mcu or [mcu <name>] and extract the name
+    sed -n \
+      -e 's/#.*$//' \
+      -e '/^[[:space:]]*\[mcu[[:space:]]*\]/!d' \
+      -e 's/^[[:space:]]*\[mcu[[:space:]]*//' \
+      -e 's/\].*$//' \
+      -e 'p' "$f" | while IFS= read -r name; do
+        # Trim leading/trailing spaces (POSIX-safe)
+        name=${name#${name%%[![:space:]]*}}
+        name=${name%${name##*[![:space:]]}}
+        [[ -z "$name" ]] && name="mcu"
+        printf '%s|%s\n' "$name" "$f"
+      done
   done | sed '/^$/d'
 }
 
@@ -191,6 +189,19 @@ resolve_board_profile() {
     return 0
   fi
 
+  # 0) Explicit board hint in the serial cfg (comment or key) takes precedence
+  local bhint
+  bhint=$(extract_board_hint "$serial_cfg_file" || true)
+  if [[ -n "$bhint" ]]; then
+    if cfgp=$(profile_config_path "$bhint" 2>/dev/null); then
+      echo "$cfgp|ok|$bhint (from board hint)"
+      return 0
+    else
+      # If the hint does not match a folder, fall through to heuristics but keep a note
+      note="(board hint '$bhint' not found under MCU_config)"
+    fi
+  fi
+
   # Heuristics by serial cfg filename
   local basefile
   basefile=$(basename -- "$serial_cfg_file" 2>/dev/null || echo "")
@@ -199,20 +210,20 @@ resolve_board_profile() {
   # Toolboards (EBB36)
   if [[ "$name_lc" == tool* || "$basefile_lc" == tool* || "$name_lc" == *ebb* ]]; then
     cfg_path="${MCU_CFG_DIR}/BTT_EBB36/.config"
-    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|BTT EBB36"; return 0; }
+    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|BTT EBB36 ${note}"; return 0; }
   fi
 
   # Fysetc Hexa probes
   if [[ "$name_lc" == *hexa* || "$basefile_lc" == *hexa* ]]; then
     # Prefer klipper.config for normal flashing
     cfg_path="${MCU_CFG_DIR}/Fysetc_Hexa/klipper.config"
-    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|Fysetc Hexa"; return 0; }
+    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|Fysetc Hexa ${note}"; return 0; }
   fi
 
   # Fysetc H36
   if [[ "$name_lc" == *h36* || "$basefile_lc" == *h36* ]]; then
     cfg_path="${MCU_CFG_DIR}/Fysetc_H36/klipper.config"
-    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|Fysetc H36"; return 0; }
+    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|Fysetc H36 ${note}"; return 0; }
   fi
 
   # Mainboard (Manta M8P variants)
@@ -226,7 +237,7 @@ resolve_board_profile() {
       folder="BTT_Manta_M8P_V2.0"
     else
       # Unknown: prefer V2.0 but warn
-      folder="BTT_Manta_M8P_V2.0"; note="(unknown chip in serial path; defaulting to V2.0)"
+      folder="BTT_Manta_M8P_V2.0"; note="(unknown chip in serial path; defaulting to V2.0) ${note}"
     fi
     cfg_path="${MCU_CFG_DIR}/${folder}/.config"
     if [[ -f "$cfg_path" ]]; then
@@ -236,7 +247,7 @@ resolve_board_profile() {
   fi
 
   # Fallback: unknown
-  echo "|unknown|No matching board profile for MCU '$name' (id: $id)"
+  echo "|unknown|No matching board profile for MCU '$name' (id: $id) ${note}"
 }
 
 # Verify passwordless sudo (no prompt) for 'make'.
@@ -258,31 +269,180 @@ if [[ -f "$KATAPULT_FLASH" ]]; then
   KATAPULT_FOUND=1
 fi
 
-# Build map of serial configs
-declare -A MCU_TYPE MCU_ID MCU_CFGFILE
-while IFS='|' read -r name type id file; do
-  [[ -z "$name" ]] && continue
+# Helper: parse a single serial cfg file for name + id (POSIX-safe; no awk regex captures)
+# Outputs: name|type|id|file (or nothing if not found)
+parse_serial_cfg_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  local name id type
+  # Extract the [mcu] or [mcu Name] first occurrence
+  name=$(sed -n \
+    -e 's/#.*$//' \
+    -e '/^[[:space:]]*\[mcu/!d' \
+    -e 's/^[[:space:]]*\[mcu[[:space:]]*//' \
+    -e 's/\].*$//' \
+    -e 'p;q' "$f")
+  [[ -z "$name" ]] && name="mcu"
+
+  # serial or canbus_uuid (first match wins)
+  id=$(sed -n \
+    -e 's/#.*$//' \
+    -e '/^[[:space:]]*serial[[:space:]]*:/!d' \
+    -e 's/^[^:]*:[[:space:]]*//' \
+    -e 's/[[:space:]]*$//' \
+    -e 'p;q' "$f")
+  if [[ -n "$id" ]]; then
+    type="serial"
+  else
+    id=$(sed -n \
+      -e 's/#.*$//' \
+      -e '/^[[:space:]]*canbus_uuid[[:space:]]*:/!d' \
+      -e 's/^[^:]*:[[:space:]]*//' \
+      -e 's/[[:space:]]*$//' \
+      -e 'p;q' "$f")
+    if [[ -n "$id" ]]; then
+      type="canbus"
+    else
+      return 0
+    fi
+  fi
+  echo "${name}|${type}|${id}|${f}"
+}
+
+# Determine which serial cfg files are actually included by printer.cfg
+# Strategy:
+# 1) Use recursive include resolver and keep only files under SERIALS_DIR
+# 2) Additionally, parse include lines in printer.cfg and all top-level cfgs under CONFIG_DIR
+#    to find includes that reference 02__Boards_Serials, to handle cases when recursive
+#    resolution misses them due to path/working-dir peculiarities.
+mapfile -t RESOLVED_CFGS < <(list_resolved_cfgs | awk '!seen[$0]++')
+
+# Helper: extract serial include targets from a single cfg file
+extract_serial_includes_from_file() {
+  local root="$1"
+  [[ -f "$root" ]] || return 0
+  local base
+  base=$(dirname -- "$root")
+  # Grab only include lines that reference 02__Boards_Serials
+  while IFS= read -r inc; do
+    # Normalize quotes
+    inc=${inc%]}            # drop trailing ] if any leftover
+    inc=${inc#*[include }   # drop prefix up to include
+    inc=${inc#*[include	}  # tabs variant (harmless if not present)
+    inc=${inc//\"/}
+    inc=${inc//\'/}
+    # Only consider entries that contain the serials folder
+    [[ "$inc" == *"02__Boards_Serials/"* ]] || continue
+    # If absolute path
+    if [[ "$inc" = /* ]]; then
+      [[ -f "$inc" ]] && echo "$inc"
+    else
+      # Remove leading ./ if present
+      inc=${inc#./}
+      [[ -f "$base/$inc" ]] && echo "$base/$inc"
+      [[ -f "$CONFIG_DIR/$inc" ]] && echo "$CONFIG_DIR/$inc"
+    fi
+  done < <(sed -n -e 's/#.*$//' -e '/^[[:space:]]*\[include[[:space:]]\{1,\}[^]]*02__Boards_Serials\//p' "$root")
+}
+
+# Collect included serial files
+INCLUDED_SERIAL_FILES=()
+# 1) From resolved includes tree (be tolerant of path forms like /./ in the path)
+for f in "${RESOLVED_CFGS[@]}"; do
+  # Normalize simple /./ occurrences
+  fnorm=${f//\/\.\//\/}
+  # Accept any path that contains the serials subfolder
+  if [[ "$fnorm" == *"/02__Boards_Serials/"* ]]; then
+    INCLUDED_SERIAL_FILES+=("$f")
+  fi
+done
+# 2) From direct parsing of include lines in printer.cfg
+while IFS= read -r p; do INCLUDED_SERIAL_FILES+=("$p"); done < <(extract_serial_includes_from_file "$PRINTER_CFG")
+# 3) From direct parsing of include lines in all top-level *.cfg files under CONFIG_DIR (user provided pattern)
+shopt -s nullglob
+for top in "$CONFIG_DIR"/*.cfg; do
+  while IFS= read -r p; do INCLUDED_SERIAL_FILES+=("$p"); done < <(extract_serial_includes_from_file "$top")
+done
+shopt -u nullglob
+
+# Deduplicate
+mapfile -t INCLUDED_SERIAL_FILES < <(printf '%s\n' "${INCLUDED_SERIAL_FILES[@]}" | awk 'NF&&!seen[$0]++')
+
+if [[ ${#INCLUDED_SERIAL_FILES[@]} -eq 0 ]]; then
+  warn "No serial cfg files from ${SERIALS_DIR} are included by ${PRINTER_CFG}."
+fi
+
+# Build map of MCUs strictly from included serial cfg files
+declare -A MCU_TYPE MCU_ID MCU_CFGFILE MCU_SOURCE MCU_BOARD_HINT
+
+# Extract optional board hint from a serial cfg file.
+# Supports either a comment:  # board: Fysetc_H36
+# or a key:                   board_profile: Fysetc_H36
+extract_board_hint() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  # Try key first
+  local hint
+  hint=$(sed -n \
+    -e 's/#.*$//' \
+    -e '/^[[:space:]]*board_profile[[:space:]]*:/!d' \
+    -e 's/^[^:]*:[[:space:]]*//' \
+    -e 's/[[:space:]]*$//' \
+    -e 'p;q' "$f")
+  if [[ -n "$hint" ]]; then echo "$hint"; return 0; fi
+  # Then comment form
+  hint=$(sed -n \
+    -e '/^[[:space:]]*#[[:space:]]*board[[:space:]]*:/!d' \
+    -e 's/^[^:]*:[[:space:]]*//' \
+    -e 's/[[:space:]]*$//' \
+    -e 'p;q' "$f")
+  [[ -n "$hint" ]] && echo "$hint" || true
+}
+
+# Return full path to the board profile's klipper config file.
+# Preference order inside a profile folder: klipper.config, .config
+profile_config_path() {
+  local profile="$1"
+  local dir="${MCU_CFG_DIR}/${profile}"
+  if [[ -d "$dir" ]]; then
+    if [[ -f "$dir/klipper.config" ]]; then
+      echo "$dir/klipper.config"; return 0
+    fi
+    if [[ -f "$dir/.config" ]]; then
+      echo "$dir/.config"; return 0
+    fi
+  fi
+  return 1
+}
+
+PARSE_DEBUG_LINES=()
+for f in "${INCLUDED_SERIAL_FILES[@]}"; do
+  line=$(parse_serial_cfg_file "$f" || true)
+  if [[ -z "$line" ]]; then
+    PARSE_DEBUG_LINES+=("$f => <no id found>")
+    continue
+  fi
+  IFS='|' read -r name type id file <<< "$line"
   MCU_TYPE["$name"]="$type"
   MCU_ID["$name"]="$id"
   MCU_CFGFILE["$name"]="$file"
-done < <(collect_mcu_serials)
+  MCU_SOURCE["$name"]="$file"
+  # Capture optional board hint
+  bhint=$(extract_board_hint "$file" || true)
+  if [[ -n "$bhint" ]]; then
+    MCU_BOARD_HINT["$name"]="$bhint"
+    PARSE_DEBUG_LINES+=("$f => name=$name type=$type id=$id board=$bhint")
+  else
+    PARSE_DEBUG_LINES+=("$f => name=$name type=$type id=$id")
+  fi
 
-if [[ ${#MCU_TYPE[@]} -eq 0 ]]; then
-  warn "No MCU serial config files found in $SERIALS_DIR"
-fi
+done
 
-# Determine active MCUs from printer.cfg (include-aware)
+# Active MCUs are those included serial cfgs we parsed
 ACTIVE_MCU_LIST=()
-declare -A MCU_SOURCE
-while IFS='|' read -r n src; do
-  [[ -z "$n" ]] && continue
+for n in "${!MCU_TYPE[@]}"; do
   ACTIVE_MCU_LIST+=("$n")
-  MCU_SOURCE["$n"]="$src"
-done < <(get_active_mcus_from_printer_cfg || true)
-
-if [[ ${#ACTIVE_MCU_LIST[@]} -eq 0 ]]; then
-  warn "No active MCUs found in $PRINTER_CFG; nothing to do unless targets are provided."
-fi
+done
 
 # If specific targets are provided, use those; else default to active list
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
@@ -293,6 +453,13 @@ fi
 if [[ $DEBUG -eq 1 ]]; then
   echo "[DEBUG] Resolved config files:"
   list_resolved_cfgs | sed 's/^/  - /'
+  echo "[DEBUG] Included serial cfgs:"
+  for f in "${INCLUDED_SERIAL_FILES[@]}"; do echo "  - $f"; done
+  # Per-file parse results
+  if [[ ${#PARSE_DEBUG_LINES[@]} -gt 0 ]]; then
+    echo "[DEBUG] Parsed serial cfgs:"
+    for l in "${PARSE_DEBUG_LINES[@]}"; do echo "  - $l"; done
+  fi
   echo "[DEBUG] Active MCUs discovered (name -> source):"
   for n in "${ACTIVE_MCU_LIST[@]}"; do
     echo "  - $n -> ${MCU_SOURCE[$n]:-unknown}"
