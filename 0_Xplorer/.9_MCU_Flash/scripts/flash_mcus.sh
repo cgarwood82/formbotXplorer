@@ -17,6 +17,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 MCU_CFG_DIR="${REPO_ROOT}/.9_MCU_Flash/MCU_config"
 PRINTER_CFG="${HOME}/printer_data/config/printer.cfg"
+CONFIG_DIR="${HOME}/printer_data/config"
 SERIALS_DIR="${HOME}/printer_data/config/02__Boards_Serials"
 KLIPPER_DIR="${HOME}/klipper"
 
@@ -24,6 +25,7 @@ KLIPPER_DIR="${HOME}/klipper"
 DRY_RUN=0
 TARGETS=()
 KEEP_KLIPPER_RUNNING=0
+DEBUG=0
 
 print_usage() {
   cat <<'USAGE'
@@ -33,10 +35,13 @@ Options:
   --targets list    Comma-separated list of MCU names to flash (alternative to positional names)
   --dry-run         Do not flash; print detected MCUs, board mapping, config used, and actions
   --keep-klipper    Do not stop/start Klipper (useful for dry-run or manual control)
+  --config path     Use an alternate printer.cfg (default: ~/printer_data/config/printer.cfg)
+  --debug           Verbose discovery: show resolved includes and MCU source files
   -h, --help        Show this help
 
 Notes:
-- Active MCUs are discovered by reading ~/printer_data/config/printer.cfg.
+- Active MCUs are discovered by reading printer.cfg and all included files (supports globs),
+  then collecting [mcu] and [mcu <name>] sections.
 - Per-MCU serial/CAN IDs are read from ~/printer_data/config/02__Boards_Serials/*.cfg files,
   which must each contain a single [mcu <name>] section and either a 'serial:' or 'canbus_uuid:' line.
 - Board mapping is inferred heuristically from MCU name and/or the USB symlink path contents.
@@ -51,6 +56,9 @@ while [[ $# -gt 0 ]]; do
       IFS=',' read -r -a TARGETS <<< "$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --keep-klipper) KEEP_KLIPPER_RUNNING=1; shift ;;
+    --config)
+      PRINTER_CFG="$2"; shift 2 ;;
+    --debug) DEBUG=1; shift ;;
     -h|--help) print_usage; exit 0 ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; print_usage; exit 2 ;;
@@ -80,25 +88,73 @@ is_forbidden_mcu_name() {
   return 1
 }
 
-# Extract active MCU names from printer.cfg ([mcu] and [mcu name])
+# Include resolution and MCU discovery
+# Recursively resolve [include <path>] from a root cfg and echo file paths (unique by caller).
+resolve_includes() {
+  local root="$1"; local depth="${2:-0}"; local max_depth=6
+  (( depth > max_depth )) && return 0
+  [[ -f "$root" ]] || return 0
+  echo "$root"
+  # parse include lines not commented out
+  while IFS= read -r line; do
+    # strip inline comments
+    line="${line%%#*}"
+    [[ "$line" =~ ^[[:space:]]*\[include[[:space:]]+([^\]]+)\][[:space:]]*$ ]] || continue
+    local inc_path="${BASH_REMATCH[1]}"
+    inc_path="${inc_path//\"/}"
+    inc_path="${inc_path//\'/}"
+    local expanded=()
+    shopt -s nullglob
+    if [[ "$inc_path" = /* ]]; then
+      expanded=( $inc_path )
+    else
+      local base_dir; base_dir=$(dirname -- "$root")
+      expanded=( "$base_dir"/$inc_path "$CONFIG_DIR"/$inc_path )
+    fi
+    for p in "${expanded[@]}"; do
+      for f in $p; do
+        [[ -f "$f" ]] || continue
+        resolve_includes "$f" $((depth+1))
+      done
+    done
+    shopt -u nullglob
+  done < "$root"
+}
+
+# Extract active MCU names from a set of files; output lines "name|source"
+extract_mcus_from_files() {
+  local f
+  for f in "$@"; do
+    awk -v src="$f" '
+      BEGIN{insec=0}
+      /^\s*\[/ {insec=1}
+      insec && /^\s*\[mcu(\s|\])/ {
+        name="mcu"
+        if ($0 ~ /\[mcu[[:space:]]+/) {
+          sub(/^\[mcu[[:space:]]+/, "", $0)
+          sub(/\].*$/, "", $0)
+          name=$0
+        }
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+        printf("%s|%s\n", name, src)
+        insec=0
+      }
+    ' "$f"
+  done | sed '/^$/d'
+}
+
+# Return active MCUs by resolving includes; outputs "name|source"
 get_active_mcus_from_printer_cfg() {
   [[ -f "$PRINTER_CFG" ]] || { err "printer.cfg not found at $PRINTER_CFG"; return 1; }
-  awk '
-    BEGIN{insec=0}
-    /^\s*\[/ {insec=1; sec=$0}
-    insec && /^\s*\[mcu(\s|\])/ {
-      # [mcu] => name="mcu" ; [mcu foo] => name=foo
-      name="mcu"
-      if ($0 ~ /\[mcu[[:space:]]+/) {
-        sub(/^\[mcu[[:space:]]+/, "", $0)
-        sub(/\].*$/, "", $0)
-        name=$0
-      }
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-      print name
-      insec=0
-    }
-  ' "$PRINTER_CFG" | sed '/^$/d' | sort -u
+  # unique list of files
+  mapfile -t files < <(resolve_includes "$PRINTER_CFG" | awk '!seen[$0]++')
+  extract_mcus_from_files "${files[@]}" | awk -F'|' '!seen[$1]++'
+}
+
+# Helper to list resolved cfgs (for --debug)
+list_resolved_cfgs() {
+  [[ -f "$PRINTER_CFG" ]] || return 0
+  resolve_includes "$PRINTER_CFG" | awk '!seen[$0]++'
 }
 
 # Read all serial config files and build mapping: name -> {type,id,file}
@@ -215,9 +271,14 @@ if [[ ${#MCU_TYPE[@]} -eq 0 ]]; then
   warn "No MCU serial config files found in $SERIALS_DIR"
 fi
 
-# Determine active MCUs from printer.cfg
+# Determine active MCUs from printer.cfg (include-aware)
 ACTIVE_MCU_LIST=()
-while IFS= read -r n; do ACTIVE_MCU_LIST+=("$n"); done < <(get_active_mcus_from_printer_cfg || true)
+declare -A MCU_SOURCE
+while IFS='|' read -r n src; do
+  [[ -z "$n" ]] && continue
+  ACTIVE_MCU_LIST+=("$n")
+  MCU_SOURCE["$n"]="$src"
+done < <(get_active_mcus_from_printer_cfg || true)
 
 if [[ ${#ACTIVE_MCU_LIST[@]} -eq 0 ]]; then
   warn "No active MCUs found in $PRINTER_CFG; nothing to do unless targets are provided."
@@ -226,6 +287,16 @@ fi
 # If specific targets are provided, use those; else default to active list
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
   TARGETS=("${ACTIVE_MCU_LIST[@]}")
+fi
+
+# Debug info on discovery
+if [[ $DEBUG -eq 1 ]]; then
+  echo "[DEBUG] Resolved config files:"
+  list_resolved_cfgs | sed 's/^/  - /'
+  echo "[DEBUG] Active MCUs discovered (name -> source):"
+  for n in "${ACTIVE_MCU_LIST[@]}"; do
+    echo "  - $n -> ${MCU_SOURCE[$n]:-unknown}"
+  done
 fi
 
 # Deduplicate targets while preserving order
@@ -269,9 +340,11 @@ print_plan() {
   echo "Detected targets:" 
   for row in "${PLAN_ROWS[@]}"; do
     IFS='|' read -r name action a b c d <<< "$row"
+    local src="${MCU_SOURCE[$name]:-unknown}"
     if [[ "$action" == "flash" ]]; then
       local cfg="$a"; local type="$b"; local id="$c"; local board="$d"
       echo "  - $name => FLASH"
+      echo "      source: $src"
       echo "      board: $board"
       echo "      config: $cfg"
       echo "      bus: $type"
@@ -288,6 +361,7 @@ print_plan() {
       fi
     else
       echo "  - $name => SKIP"
+      echo "      source: $src"
       echo "      reason: $a"
     fi
   done
