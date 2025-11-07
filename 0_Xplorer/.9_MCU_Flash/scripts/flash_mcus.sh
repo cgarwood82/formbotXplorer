@@ -610,7 +610,22 @@ for row in "${PLAN_ROWS[@]}"; do
 
   log "Flashing $name ..."
   if [[ "$type" == "serial" ]]; then
-    sudo -n make flash FLASH_DEVICE="$id"
+    # Soft-handle known dfu-util leave timing error after successful download
+    set +e
+    flash_log=$(mktemp)
+    sudo -n make flash FLASH_DEVICE="$id" |& tee "$flash_log"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if (( rc != 0 )); then
+      if grep -q "Error during download get_status" "$flash_log" \
+         && grep -Eq "(Download done\.|File downloaded successfully)" "$flash_log"; then
+        warn "DFU reported leave timing error after successful download; proceeding."
+      else
+        warn "Flashing $name failed (exit $rc). See log: $flash_log"
+        popd >/dev/null
+        exit $rc
+      fi
+    fi
   elif [[ "$type" == "canbus" ]]; then
     FW_BIN="$KLIPPER_DIR/out/klipper.bin"
     if [[ ! -f "$FW_BIN" ]]; then
