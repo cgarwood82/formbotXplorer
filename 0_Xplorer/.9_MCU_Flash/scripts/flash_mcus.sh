@@ -4,7 +4,7 @@
 # - Targeted: flash only specific MCUs via --targets mcu1,mcu2 or positional names
 # - Dry run: --dry-run prints what would be flashed, sources, and reasons for any skips
 # - Skips: beacon/cartographer devices are detected and skipped automatically
-# - Sudo: requires passwordless sudo for make; script verifies before proceeding
+# - Sudo: user must be in the 'sudo' group and passwordless sudo is required for make; script verifies before proceeding
 # - Services: stops Klipper once before flashing, restarts at the end
 #
 # This script relies on per-board .config templates in .9_MCU_Flash/MCU_config
@@ -562,10 +562,16 @@ if [[ $HAS_CAN_FLASH -eq 1 ]]; then
   requires python3
 fi
 
+# Require membership in 'sudo' group
+if ! id -nG "$USER" | tr ' ' '\n' | grep -qx "sudo"; then
+  err "This script requires your user to be a member of the 'sudo' group. Add the user to 'sudo' and re-login (new shell session)."
+  exit 9
+fi
+
 # Require passwordless sudo
 if ! check_passwordless_sudo; then
-  err "Passwordless sudo for 'make' is required. Configure your user in sudoers, e.g.:
-  <username> ALL=(ALL) NOPASSWD: /usr/bin/make
+  err "Passwordless sudo for 'make' is required. Configure group-based sudoers, e.g.:
+  %sudo ALL=(ALL) NOPASSWD: /usr/bin/make, /bin/systemctl, /usr/sbin/service
 Then re-run this script. Aborting."
   exit 10
 fi
