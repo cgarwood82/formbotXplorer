@@ -5,14 +5,14 @@ time_str=$(date +"%H%M")
 date_str=$(date +"%d%m%Y")
 
 # Construct the output filename
-output_filename="/home/biqu/printer_data/config/03_Resonances_Measurments/shaper_calibrate_x_t2_${time_str}_${date_str}.png"
+output_filename="/home/biqu/printer_data/config/03_Resonances_Measurments/shaper_calibrate_y_iqexmr_${time_str}_${date_str}.png"
 
 # Find the most recently created file matching the patterns
-latest_file=$(find /tmp -maxdepth 1 -type f \( -name "resonances_x_*.csv" -o -name "calibration_data_x_*.csv" \) -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+latest_file=$(find /tmp -maxdepth 1 -type f \( -name "resonances_y_*.csv" -o -name "calibration_data_y_*.csv" \) -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 
 # Check if a valid file was found
 if [ -z "$latest_file" ]; then
-  echo "Error: No matching file found for resonances_x_*.csv or calibration_data_x_*.csv"
+  echo "Error: No matching file found for resonances_y_*.csv or calibration_data_y_*.csv"
   exit 1
 fi
 
@@ -42,20 +42,20 @@ config_file="/home/biqu/printer_data/config/variables.cfg"
 cp "$config_file" "/home/biqu/printer_data/config/.variables.cfg.bak"
 
 # Update or add the shaper settings
-if grep -q "^shaper_type_xt2" "$config_file"; then
+if grep -q "^shaper_type_yiqexmr" "$config_file"; then
   # Update existing entries
-  sed -i "s/^shaper_type_xt2.*/shaper_type_xt2 = '$recommended_shaper'/" "$config_file"
+  sed -i "s/^shaper_type_yiqexmr.*/shaper_type_yiqexmr = '$recommended_shaper'/" "$config_file"
 else
   # Add new entry with a newline
-  echo -e "\nshaper_type_xt2 = '$recommended_shaper'" >> "$config_file"
+  echo -e "\nshaper_type_yiqexmr = '$recommended_shaper'" >> "$config_file"
 fi
 
-if grep -q "^shaper_freq_xt2" "$config_file"; then
+if grep -q "^shaper_freq_yiqexmr" "$config_file"; then
   # Update existing entries
-  sed -i "s/^shaper_freq_xt2.*/shaper_freq_xt2 = $recommended_freq/" "$config_file"
+  sed -i "s/^shaper_freq_yiqexmr.*/shaper_freq_yiqexmr = $recommended_freq/" "$config_file"
 else
   # Add new entry with a newline
-  echo "shaper_freq_xt2 = $recommended_freq" >> "$config_file"
+  echo "shaper_freq_yiqexmr = $recommended_freq" >> "$config_file"
 fi
 
 # Ensure proper formatting by adding a newline after the last variable if needed
