@@ -19,7 +19,7 @@ fi
 echo "Using file: $latest_file"
 
 # Run the Python script and capture its output
-shaper_output=$(~/klipper/scripts/calibrate_shaper.py "$latest_file" -o "$output_filename")
+shaper_output=$($HOME/klippy-env/bin/python3 $HOME/klipper/scripts/calibrate_shaper.py "$latest_file" -o "$output_filename")
 
 # Print the output filename
 echo "Output file: $output_filename"
