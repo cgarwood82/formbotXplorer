@@ -95,7 +95,16 @@ class ToolsCalibrate:
     cmd_TOOL_CALIBRATE_QUERY_PROBE_help = "Return the state of calibration probe"
 
     def _move_xyz(self, x=None, y=None, z=None, speed=None):
-        # speed in mm/s → F in mm/min
+        # DEBUG
+        try:
+            self.gcode.respond_info(
+                "DEBUG: _move_xyz x=%s y=%s z=%s speed=%s via_macros=%s macro_move=%s"
+                % (x, y, z, speed, self.move_via_macros, self.macro_move)
+            )
+        except Exception:
+            pass
+
+        # existing code:
         fval = None
         if speed is not None:
             fval = max(1, int(round(speed * 60.0)))
@@ -284,6 +293,13 @@ class PrinterProbeMultiAxis:
         return pos
 
     def _move(self, coord, speed):
+        try:
+            self.gcode.respond_info(
+                "DEBUG: probe _move coord=%s speed=%s via_macros=%s macro_move=%s"
+                % (coord, speed, self.move_via_macros, self.macro_move)
+            )
+        except Exception:
+            pass
         if self.move_via_macros:
             # coord is [x, y, z] with None for unchanged
             parts = []
