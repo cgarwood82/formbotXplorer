@@ -158,6 +158,7 @@ class ToolsCalibrate:
         return [center_x, center_y, center_z]
 
     def cmd_TOOL_LOCATE_SENSOR(self, gcmd):
+        gcmd.respond_info("DEBUG: hack_tools_calibrate TOOL_LOCATE_SENSOR called")
         res = self.locate_sensor(gcmd)
         self.sensor_location = res
         self.last_result = res
