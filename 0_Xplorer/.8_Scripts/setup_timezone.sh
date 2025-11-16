@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the path to the password file
-PASSWORD_FILE="/home/biqu/printer_data/config/.system_pass.txt"
+PASSWORD_FILE="$HOME/printer_data/config/.system_pass.txt"
 
 # Check if the password file exists
 if [ ! -f "$PASSWORD_FILE" ]; then
