@@ -4,7 +4,8 @@
 time_str=$(date +"%H%M")
 date_str=$(date +"%d%m%Y")
 
-output_filename="$HOME/printer_data/config/03_Resonances_Measurements/shaper_calibrate_x_t2_${time_str}_${date_str}.png"
+# Construct the output filename
+output_filename="$HOME/printer_data/config/03_Resonances_Measurments/shaper_calibrate_x_t2_${time_str}_${date_str}.png"
 
 # Find the most recently created file matching the patterns
 latest_file=$(find /tmp -maxdepth 1 -type f \( -name "resonances_x_*.csv" -o -name "calibration_data_x_*.csv" \) -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
@@ -19,7 +20,7 @@ fi
 echo "Using file: $latest_file"
 
 # Run the Python script and capture its output
-shaper_output=$($HOME/klippy-env/bin/python3 $HOME/klipper/scripts/calibrate_shaper.py "$latest_file" -o "$output_filename")
+shaper_output=$(~/klipper/scripts/calibrate_shaper.py "$latest_file" -o "$output_filename")
 
 # Print the output filename
 echo "Output file: $output_filename"
@@ -35,10 +36,10 @@ if [ -z "$recommended_shaper" ] || [ -z "$recommended_freq" ]; then
 fi
 
 # Define the configuration file path
-config_file="/home/biqu/printer_data/config/variables.cfg"
+config_file="$HOME/printer_data/config/variables.cfg"
 
 # Backup the configuration file as a hidden file
-cp "$config_file" "/home/biqu/printer_data/config/.variables.cfg.bak"
+cp "$config_file" "$HOME/printer_data/config/.variables.cfg.bak"
 
 # Update or add the shaper settings
 if grep -q "^shaper_type_xt2" "$config_file"; then
@@ -61,4 +62,4 @@ fi
 sed -i -e '$a\' "$config_file"
 
 echo "Recommended shaper settings updated in $config_file"
-echo "Backup saved as /home/biqu/printer_data/config/.variables.cfg.bak"
+echo "Backup saved as $HOME/printer_data/config/.variables.cfg.bak"
