@@ -34,6 +34,8 @@ HINT_TIMEOUT = (
 
 class ToolsCalibrate:
     def __init__(self, config):
+        self.move_via_macros = True
+        self.macro_move = 'CAL_SAFE_MOVE'
         self.printer = config.get_printer()
         self.name = config.get_name()
         self.gcode_move = self.printer.load_object(config, "gcode_move")
@@ -145,8 +147,12 @@ class ToolsCalibrate:
         toolhead = self.printer.lookup_object('toolhead')
         position = toolhead.get_position()
         downPos = self.probe_multi_axis.run_probe("z-", gcmd, samples=1)
+        gcmd.respond_info("DEBUG: locate_sensor after first probe, downPos=%s lift_z=%.3f final_lift_z=%.3f"
+                          % (downPos, self.lift_z, self.final_lift_z))
         center_x, center_y = self.calibrate_xy(toolhead, downPos, gcmd,
                                                samples=1)
+        gcmd.respond_info("DEBUG: locate_sensor after calibrate_xy center_x=%.3f center_y=%.3f"
+                          % (center_x, center_y))
 
         # rest above center and re-probe Z slowly
         self._move_xyz(z=downPos[2] + self.lift_z, speed=self.lift_speed)
