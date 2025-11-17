@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="YamllintSettings">
+    <enabled>true</enabled>
+    <binPath>$PROJECT_DIR$/.venv/bin/yamllint</binPath>
+    <configPath>$USER_HOME$/.config/yamllint/config</configPath>
+  </component>
+</project>
