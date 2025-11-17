@@ -5,7 +5,7 @@ time_str=$(date +"%H%M")
 date_str=$(date +"%d%m%Y")
 
 # Construct the output filename
-output_filename="$HOME/printer_data/config/03_Resonances_Measurements/shaper_calibrate_y_2xGantrymr_${time_str}_${date_str}.png"
+output_filename="$HOME/printer_data/config/03_Resonances_Measurments/shaper_calibrate_y_2xGantrymr_${time_str}_${date_str}.png"
 
 # Find the most recently created file matching the patterns
 latest_file=$(find /tmp -maxdepth 1 -type f \( -name "resonances_y_*.csv" -o -name "calibration_data_y_*.csv" \) -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
