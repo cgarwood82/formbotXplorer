@@ -170,7 +170,7 @@ class ToolsCalibrate:
         self.calibration_probe_triggered = trig
         gcmd.respond_info("Calibration Probe: %s" % (["open", "TRIGGERED"][trig]))
 
-    def get_status(self):
+    def get_status(self, eventtime):
         lr = self.last_result if self.last_result is not None else [0.0, 0.0, 0.0]
         return {
             'last_result': lr,
