@@ -1,7 +1,7 @@
-
 # Nozzle alignment module for 3d kinematic probes.
 #
-# This module has been adapted from code written by Kevin O'Connor <kevin@koconnor.net> and Martin Hierholzer <martin@hierholzer.info>
+# This module has been adapted from code written by Kevin O'Connor <kevin@koconnor.net>
+# and Martin Hierholzer <martin@hierholzer.info>
 # Sourced from https://github.com/ben5459/Klipper_ToolChanger/blob/master/probe_multi_axis.py
 
 import logging
@@ -49,21 +49,31 @@ class ToolsCalibrate:
         self.last_probe_offset = 0.0
         self.calibration_probe_triggered = False
 
-        self.gcode.register_command('TOOL_LOCATE_SENSOR',
-                                    self.cmd_TOOL_LOCATE_SENSOR,
-                                    desc="Locate the tool calibration sensor, use with tool 0.")
-        self.gcode.register_command('TOOL_CALIBRATE_TOOL_OFFSET',
-                                    self.cmd_TOOL_CALIBRATE_TOOL_OFFSET,
-                                    desc="Calibrate current tool offset relative to tool 0")
-        self.gcode.register_command('TOOL_CALIBRATE_SAVE_TOOL_OFFSET',
-                                    self.cmd_TOOL_CALIBRATE_SAVE_TOOL_OFFSET,
-                                    desc="Save tool offset calibration to config")
-        self.gcode.register_command('TOOL_CALIBRATE_PROBE_OFFSET',
-                                    self.cmd_TOOL_CALIBRATE_PROBE_OFFSET,
-                                    desc="Calibrate the tool probe offset to nozzle tip")
-        self.gcode.register_command('TOOL_CALIBRATE_QUERY_PROBE',
-                                    self.cmd_TOOL_CALIBRATE_QUERY_PROBE,
-                                    desc="Return the state of calibration probe")
+        self.gcode.register_command(
+            'TOOL_LOCATE_SENSOR',
+            self.cmd_TOOL_LOCATE_SENSOR,
+            desc="Locate the tool calibration sensor, use with tool 0."
+        )
+        self.gcode.register_command(
+            'TOOL_CALIBRATE_TOOL_OFFSET',
+            self.cmd_TOOL_CALIBRATE_TOOL_OFFSET,
+            desc="Calibrate current tool offset relative to tool 0"
+        )
+        self.gcode.register_command(
+            'TOOL_CALIBRATE_SAVE_TOOL_OFFSET',
+            self.cmd_TOOL_CALIBRATE_SAVE_TOOL_OFFSET,
+            desc="Save tool offset calibration to config"
+        )
+        self.gcode.register_command(
+            'TOOL_CALIBRATE_PROBE_OFFSET',
+            self.cmd_TOOL_CALIBRATE_PROBE_OFFSET,
+            desc="Calibrate the tool probe offset to nozzle tip"
+        )
+        self.gcode.register_command(
+            'TOOL_CALIBRATE_QUERY_PROBE',
+            self.cmd_TOOL_CALIBRATE_QUERY_PROBE,
+            desc="Return the state of calibration probe"
+        )
 
     def probe_xy(self, toolhead, top_pos, direction, gcmd, samples=None):
         offset = direction_types[direction]
@@ -91,14 +101,18 @@ class ToolsCalibrate:
         toolhead = self.printer.lookup_object('toolhead')
         position = list(toolhead.get_position())
 
+        # Keep these explicitly single-sample unless/until you add a proper
+        # retract strategy in *all* call sites.
         downPos = self.probe_multi_axis.run_probe("z-", gcmd, samples=1)
         center_x, center_y = self.calibrate_xy(toolhead, downPos, gcmd, samples=1)
 
         toolhead.manual_move([None, None, downPos[2] + self.lift_z], self.lift_speed)
         toolhead.manual_move([center_x, center_y, None], self.travel_speed)
-        center_z = self.probe_multi_axis.run_probe("z-", gcmd, speed_ratio=0.5)[2]
 
-        center_x, center_y = self.calibrate_xy(toolhead, [center_x, center_y, center_z], gcmd)
+        # ALSO force single-sample here; this was one of the common regression points.
+        center_z = self.probe_multi_axis.run_probe("z-", gcmd, speed_ratio=0.5, samples=1)[2]
+
+        center_x, center_y = self.calibrate_xy(toolhead, [center_x, center_y, center_z], gcmd, samples=1)
 
         position[0] = center_x
         position[1] = center_y
@@ -112,16 +126,20 @@ class ToolsCalibrate:
     def cmd_TOOL_LOCATE_SENSOR(self, gcmd):
         self.last_result = self.locate_sensor(gcmd)
         self.sensor_location = self.last_result
-        self.gcode.respond_info("Sensor location at %.6f,%.6f,%.6f"
-                                % (self.last_result[0], self.last_result[1], self.last_result[2]))
+        self.gcode.respond_info(
+            "Sensor location at %.6f,%.6f,%.6f"
+            % (self.last_result[0], self.last_result[1], self.last_result[2])
+        )
 
     def cmd_TOOL_CALIBRATE_TOOL_OFFSET(self, gcmd):
         if not self.sensor_location:
             raise gcmd.error("No recorded sensor location, please run TOOL_LOCATE_SENSOR first")
         location = self.locate_sensor(gcmd)
         self.last_result = [location[i] - self.sensor_location[i] for i in range(3)]
-        self.gcode.respond_info("Tool offset is %.6f,%.6f,%.6f"
-                                % (self.last_result[0], self.last_result[1], self.last_result[2]))
+        self.gcode.respond_info(
+            "Tool offset is %.6f,%.6f,%.6f"
+            % (self.last_result[0], self.last_result[1], self.last_result[2])
+        )
 
     def cmd_TOOL_CALIBRATE_SAVE_TOOL_OFFSET(self, gcmd):
         if self.last_result is None:
@@ -138,7 +156,7 @@ class ToolsCalibrate:
         probe = self.printer.lookup_object(self.probe_name)
         start_pos = list(toolhead.get_position())
 
-        nozzle_z = self.probe_multi_axis.run_probe("z-", gcmd, speed_ratio=0.5)[2]
+        nozzle_z = self.probe_multi_axis.run_probe("z-", gcmd, speed_ratio=0.5, samples=1)[2]
 
         probe_session = probe.start_probe_session(gcmd)
         probe_session.run_probe(gcmd)
@@ -210,11 +228,6 @@ class PrinterProbeMultiAxis:
             raise self.printer.lookup_object('pins').error("Can not pullup/invert probe virtual endstop")
         return self.mcu_probe
 
-    def get_lift_speed(self, gcmd=None):
-        if gcmd is not None:
-            return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.)
-        return self.lift_speed
-
     def _get_target_position(self, axis, sense, max_distance):
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
@@ -235,19 +248,18 @@ class PrinterProbeMultiAxis:
 
         return pos
 
-    def _probe(self, speed, axis, sense, max_distance, direction_label):
+    def _probe(self, speed, axis, sense, max_distance, direction_label, gcmd):
         phoming = self.printer.lookup_object('homing')
         toolhead = self.printer.lookup_object('toolhead')
 
         try:
             pre = self.mcu_probe[axis].query_endstop(toolhead.get_last_move_time())
         except Exception:
-            pre = None
+            pre = 0
 
-        self.gcode.respond_info(
-            "DEBUG probe begin dir=%s axis=%d sense=%d pre_endstop=%s"
-            % (direction_label, axis, sense, str(pre))
-        )
+        # If the probe is already triggered, abort early to avoid shoving harder.
+        if pre:
+            raise gcmd.error("Probe triggered prior to movement")
 
         pos = self._get_target_position(axis, sense, max_distance)
 
@@ -259,8 +271,6 @@ class PrinterProbeMultiAxis:
                 reason += HINT_TIMEOUT
             raise self.printer.command_error(reason)
 
-        self.gcode.respond_info("Probe made contact at %.6f,%.6f,%.6f"
-                                % (epos[0], epos[1], epos[2]))
         return epos[:3]
 
     def _calc_mean(self, positions):
@@ -273,6 +283,34 @@ class PrinterProbeMultiAxis:
         if (len(positions) & 1) == 1:
             return axis_sorted[middle]
         return self._calc_mean(axis_sorted[middle - 1:middle + 1])
+
+    def _retract_between_samples(self, axis, sense, toolhead, gcmd):
+        # Move opposite of the probe direction by sample_retract_dist
+        cur = list(toolhead.get_position())
+        retract = [None, None, None]
+        retract[axis] = cur[axis] - (sense * self.sample_retract_dist)
+
+        toolhead.manual_move(retract, self.lift_speed)
+        toolhead.wait_moves()
+
+        # If still triggered, back off a couple more times.
+        for _ in range(2):
+            try:
+                state = self.mcu_probe[axis].query_endstop(toolhead.get_last_move_time())
+            except Exception:
+                state = 0
+            if not state:
+                return
+            cur = list(toolhead.get_position())
+            retract = [None, None, None]
+            retract[axis] = cur[axis] - (sense * self.sample_retract_dist)
+            toolhead.manual_move(retract, self.lift_speed)
+            toolhead.wait_moves()
+
+        raise gcmd.error(
+            "Probe still triggered after retract between samples. "
+            "Increase sample_retract_dist or check probe mechanics."
+        )
 
     def run_probe(self, direction, gcmd, speed_ratio=1.0, samples=None, max_distance=100.0):
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.) * speed_ratio
@@ -287,24 +325,26 @@ class PrinterProbeMultiAxis:
         samples_result = gcmd.get("SAMPLES_RESULT", self.samples_result)
 
         retries = 0
-        positions = []
+        toolhead = self.printer.lookup_object('toolhead')
 
-        while len(positions) < sample_count:
-            pos = self._probe(speed, axis, sense, max_distance, direction)
-            positions.append(pos)
+        while True:
+            positions = []
+            while len(positions) < sample_count:
+                pos = self._probe(speed, axis, sense, max_distance, direction, gcmd)
+                positions.append(pos)
+                if len(positions) < sample_count:
+                    self._retract_between_samples(axis, sense, toolhead, gcmd)
 
             axis_positions = [p[axis] for p in positions]
             if max(axis_positions) - min(axis_positions) > samples_tolerance:
                 if retries >= samples_retries:
                     raise gcmd.error("Probe samples exceed samples_tolerance")
-                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
-                positions = []
                 continue
 
-        if samples_result == 'median':
-            return self._calc_median(positions, axis)
-        return self._calc_mean(positions)
+            if samples_result == 'median':
+                return self._calc_median(positions, axis)
+            return self._calc_mean(positions)
 
 
 class ProbeEndstopWrapper:
@@ -337,32 +377,21 @@ class ProbeEndstopWrapper:
             return toolhead.get_status(curtime).get('extruder')
 
     def _get_steppers(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        kin = toolhead.get_kinematics()
+
+        extr = self._active_extruder_name()
+
+        # X axis: per tool stepper
         if self.axis == 'x':
-            extr = self._active_extruder_name()
             want = {
-                'extruder':  'stepper x',
-                'extruder1': 'stepper x1',
-                'extruder2': 'stepper x2',
-                'extruder3': 'stepper x3',
+                'extruder':  ['stepper x'],
+                'extruder1': ['stepper x1'],
+                'extruder2': ['stepper x2'],
+                'extruder3': ['stepper x3'],
             }.get(extr)
-
-            toolhead = self.printer.lookup_object('toolhead')
-            kin = toolhead.get_kinematics()
-
-            all_names = []
-            for s in kin.get_steppers():
-                try:
-                    all_names.append(s.get_name())
-                except Exception:
-                    all_names.append(str(s))
-
             if want is None:
-                st = self.mcu_endstop.get_steppers()
-                chosen = [s.get_name() for s in st]
-                self.printer.lookup_object('gcode').respond_info(
-                    f"DEBUG get_steppers axis=x extr={extr} want=None fallback={chosen} all={all_names}"
-                )
-                return st
+                return self.mcu_endstop.get_steppers()
 
             chosen = []
             for s in kin.get_steppers():
@@ -370,29 +399,45 @@ class ProbeEndstopWrapper:
                     nm = s.get_name()
                 except Exception:
                     continue
-                if nm == want:
+                if nm in want:
                     chosen.append(s)
 
-            if not chosen:
+            if len(chosen) != len(want):
                 raise self.printer.command_error(
-                    f"tools_calibrate: active extruder={extr} expected '{want}' but couldn't find it. "
-                    f"Available steppers: {all_names}"
+                    f"tools_calibrate: axis=x active extruder={extr} expected {want} but got "
+                    f"{[c.get_name() for c in chosen]}"
                 )
-
-            self.printer.lookup_object('gcode').respond_info(
-                f"DEBUG get_steppers axis=x extr={extr} chosen={[s.get_name() for s in chosen]} all={all_names}"
-            )
             return chosen
 
-        st = self.mcu_endstop.get_steppers()
-        try:
-            chosen = [s.get_name() for s in st]
-        except Exception:
-            chosen = [str(s) for s in st]
-        self.printer.lookup_object('gcode').respond_info(
-            f"DEBUG get_steppers axis={self.axis} chosen={chosen}"
-        )
-        return st
+        # Y axis: per gantry steppers
+        if self.axis == 'y':
+            want = {
+                'extruder':  ['stepper y', 'stepper y1'],
+                'extruder1': ['stepper y', 'stepper y1'],
+                'extruder2': ['stepper y2', 'stepper y3'],
+                'extruder3': ['stepper y2', 'stepper y3'],
+            }.get(extr)
+            if want is None:
+                return self.mcu_endstop.get_steppers()
+
+            chosen = []
+            for s in kin.get_steppers():
+                try:
+                    nm = s.get_name()
+                except Exception:
+                    continue
+                if nm in want:
+                    chosen.append(s)
+
+            if len(chosen) != len(want):
+                raise self.printer.command_error(
+                    f"tools_calibrate: axis=y active extruder={extr} expected {want} but got "
+                    f"{[c.get_name() for c in chosen]}"
+                )
+            return chosen
+
+        # Other axes (Z): default wrapper selection
+        return self.mcu_endstop.get_steppers()
 
     def _handle_mcu_identify(self):
         kin = self.printer.lookup_object('toolhead').get_kinematics()
