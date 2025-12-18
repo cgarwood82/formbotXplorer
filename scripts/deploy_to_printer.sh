@@ -7,6 +7,7 @@
 # Requirements: rsync, tar, git (optional if --no-git), diff
 
 set -euo pipefail
+log "SCRIPT_PATH: ${BASH_SOURCE[0]}"
 
 # --- Discover paths ----------------------------------------------------------
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -296,12 +297,9 @@ show_preflight_diffs() {
   [[ $SHOW_DIFF -eq 1 ]] || return 0
   require_cmd diff
 
-  command -v file >/dev/null 2>&1 || warn "Command 'file' not found; will diff without binary detection."
-
   log "Diffs for changed files (repo -> printer):"
 
   local shown=0
-  # Feed preflight_out through awk and read each path line-by-line
   while IFS= read -r p; do
     p="${p//$'\r'/}"
     [[ -z "$p" ]] && continue
@@ -315,32 +313,25 @@ show_preflight_diffs() {
       warn "Skip diff (missing in repo): $src"
       continue
     fi
-    if [[ ! -f "$dst" ]]; then
-      log "---- $p"
-      # diff returns:
-      #  0 = no differences
-      #  1 = differences found (normal)
-      #  2 = trouble (real error)
-      set +e
-      diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src"
-      rc=$?
-      set -e
-      if [[ $rc -eq 2 ]]; then
-        warn "diff error for $p (rc=2)"
-      fi
-      ((shown++))
-    fi
 
-    if command -v file >/dev/null 2>&1; then
-      if file --mime "$src" "$dst" | grep -qi 'charset=binary'; then
-        log "---- $p (binary; skipping diff)"
-        ((shown++))
-        continue
-      fi
+    if [[ ! -f "$dst" ]]; then
+      log "---- $p (new file on deploy)"
+      ((shown++))
+      continue
     fi
 
     log "---- $p"
-    diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src" || true
+
+    # diff rc: 0 same, 1 different, 2 error
+    set +e
+    diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src"
+    rc=$?
+    set -e
+
+    if [[ $rc -eq 2 ]]; then
+      warn "diff error for $p (rc=2)"
+    fi
+
     ((shown++))
   done < <(
     printf '%s\n' "$preflight_out" |
