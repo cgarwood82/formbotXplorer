@@ -40,10 +40,5 @@ Subdirectories inside `config/`:
 - `Macros/` — User macros grouped by purpose (bed leveling, probing, LED state, motion tests,
   print control, etc.). These are included by the main stack via `printer.cfg` or defaults.
 
-### NotMine/
-Holds files that are not managed through the main update manager but are useful to
-install on the printer.
-- `NotMine/xplorer.py`: A Klipper module loader used by Xplorer.
-
 ### scripts/
 wip
