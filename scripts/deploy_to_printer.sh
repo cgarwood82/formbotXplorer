@@ -298,41 +298,8 @@ show_preflight_diffs() {
 
   log "Diffs for changed files (repo -> printer):"
 
-  local shown=0
-  while IFS= read -r p; do
-    p="${p//$'\r'/}"
-    [[ -z "$p" ]] && continue
-
-    (( shown >= DIFF_MAX_FILES )) && { warn "Diff limit reached ($DIFF_MAX_FILES files)."; break; }
-
-    local src="$REPO_CONFIG_DIR/$p"
-    local dst="$KLIPPERCONFIG/$p"
-
-    if [[ ! -f "$src" ]]; then
-      warn "Skip diff (missing in repo): $src"
-      continue
-    fi
-
-    if [[ ! -f "$dst" ]]; then
-      log "---- $p (new file on deploy)"
-      ((shown++))
-      continue
-    fi
-
-    log "---- $p"
-
-    # diff rc: 0 same, 1 different, 2 error
-    set +e
-    diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src"
-    rc=$?
-    set -e
-
-    if [[ $rc -eq 2 ]]; then
-      warn "diff error for $p (rc=2)"
-    fi
-
-    ((shown++))
-  done < <(
+  # Build file list safely
+  mapfile -t diff_files < <(
     printf '%s\n' "$preflight_out" |
       awk '
         $1 ~ /^>f/ {
@@ -345,9 +312,40 @@ show_preflight_diffs() {
       '
   )
 
-  if [[ $shown -eq 0 ]]; then
+  if [[ ${#diff_files[@]} -eq 0 ]]; then
     log "  (No content-changing regular files detected to diff.)"
+    return 0
   fi
+
+  local shown=0
+  for p in "${diff_files[@]}"; do
+    (( shown >= DIFF_MAX_FILES )) && {
+      warn "Diff limit reached ($DIFF_MAX_FILES files)."
+      break
+    }
+
+    local src="$REPO_CONFIG_DIR/$p"
+    local dst="$KLIPPERCONFIG/$p"
+
+    [[ -f "$src" ]] || { warn "Skip diff (missing in repo): $src"; continue; }
+
+    if [[ ! -f "$dst" ]]; then
+      log "---- $p (new file on deploy)"
+      ((shown++))
+      continue
+    fi
+
+    log "---- $p"
+
+    # diff: 0 same, 1 different, 2 error
+    set +e
+    diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src"
+    rc=$?
+    set -e
+
+    [[ $rc -eq 2 ]] && warn "diff error for $p (rc=2)"
+    ((shown++))
+  done
 }
 
 # --- Config deployment (tarball snapshots) -----------------------------------
