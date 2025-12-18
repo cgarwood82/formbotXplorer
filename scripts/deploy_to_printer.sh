@@ -4,7 +4,7 @@
 # - Uses a single tarball snapshot backup for the printer config dir before applying changes
 # - Keeps backups OUT of the repo and OUT of ~/printer_data/config
 #
-# Requirements: rsync, tar, git (optional if --no-git)
+# Requirements: rsync, tar, git (optional if --no-git), diff
 
 set -euo pipefail
 
@@ -74,7 +74,7 @@ Options:
   --git-branch B   Use branch B for pull (default: current branch)
   --allow-dirty    Proceed even if the working tree has uncommitted changes
   --stash          Auto-stash uncommitted changes before pull and pop after
-  --diff           For config deploy preflight, show unified diffs for changed text files
+  --diff           For config deploy preflight (dry-run), show unified diffs for changed text files
   --diff-context N Diff context lines (default: 3)
   --diff-max N     Max files to diff (default: 50)
   -h, --help       Show this help
@@ -238,7 +238,8 @@ mkdir -p "$EXTRAS_DIR" "$KLIPPERCONFIG"
 # --- NotMine deployment ------------------------------------------------------
 install_file_smart() {
   local src="$1"; local dest="$2"; local backup_root="$3"
-  local name; name=$(basename "$dest")
+  local name; name
+  name=$(basename "$dest")
 
   if [[ ! -f "$src" ]]; then
     warn "Skip (source missing): $src"
@@ -265,7 +266,6 @@ install_file_smart() {
     if ! cmp -s "$src" "$dest"; then
       mkdir -p "$backup_root"
       local backup_path="$backup_root/${name}.${TIMESTAMP}.bak"
-      # Only back up non-empty dest files
       if [[ -s "$dest" ]]; then
         cp -f -- "$dest" "$backup_path"
         log "Backed up $dest -> $backup_path"
@@ -286,35 +286,34 @@ install_file_smart() {
 install_notmine() {
   local src_py="$REPO_NOTMINE_DIR/xplorer.py"
   local dest_py="$EXTRAS_DIR/xplorer.py"
-
   install_file_smart "$src_py" "$dest_py" "$NOTMINE_BACKUP_DIR"
 }
 
+# --- Diff helper -------------------------------------------------------------
 show_preflight_diffs() {
   local preflight_out="$1"
 
   [[ $SHOW_DIFF -eq 1 ]] || return 0
-
   require_cmd diff
+
   # "file" is optional but helps skip binaries safely
   command -v file >/dev/null 2>&1 || warn "Command 'file' not found; will diff without binary detection."
 
   log "Diffs for changed files (repo -> printer):"
 
-  # Extract paths that rsync says will be transferred/updated.
-  # We only diff regular files that are being sent (">f") AND show signs of content change ("s" size) or checksum ("c")
-  # Format example: >f.st...... path
   local -a paths=()
   while IFS= read -r line; do
-    # skip deletions and dirs
+    # Only diff regular files that rsync will send (">f")
     [[ "$line" =~ ^\>f ]] || continue
-    # only show diffs for likely content changes (size or checksum differs)
-    # rsync itemize has "c" or "s" in the change positions; simplest: require an 's' or 'c' somewhere in the flags
-    [[ "$line" =~ ^\>f.*[cs] ]] || continue
 
-    # path is after the last space(s)
+    # Only diff when CONTENT likely changed: 'c' (checksum) or 's' (size).
+    # Look ONLY at the 11-char itemize field (before the space), not the filename.
+    local flags="${line:0:11}"
+    [[ "$flags" == *c* || "$flags" == *s* ]] || continue
+
+    # Path begins at column 13 (0-based index 12): 11 flags + space
     local path="${line:12}"
-    path="${path#"${path%%[![:space:]]*}"}"  # trim leading spaces just in case
+    path="${path#"${path%%[![:space:]]*}"}"
     [[ -n "$path" ]] && paths+=("$path")
   done <<< "$preflight_out"
 
@@ -331,18 +330,21 @@ show_preflight_diffs() {
     local dst="$KLIPPERCONFIG/$p"
 
     [[ -f "$src" ]] || continue
-    [[ -f "$dst" ]] || { log "---- $p (new file)"; continue; }
+    [[ -f "$dst" ]] || { log "---- $p (new file)"; ((shown++)); continue; }
 
     # Skip binaries if we have `file`
     if command -v file >/dev/null 2>&1; then
       if file --mime "$src" "$dst" | grep -qi 'charset=binary'; then
         log "---- $p (binary; skipping diff)"
+        ((shown++))
         continue
       fi
     fi
 
     log "---- $p"
-    # Use unified diff; tolerate non-zero exit when differences exist
+    # diff order is: printer then repo, so:
+    #  - lines are "removed from printer by deploy"
+    #  + lines are "added from repo by deploy"
     diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src" || true
     ((shown++))
   done
