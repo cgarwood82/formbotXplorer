@@ -44,6 +44,9 @@ GIT_REMOTE=""
 GIT_BRANCH=""
 ALLOW_DIRTY=0
 AUTO_STASH=0
+SHOW_DIFF=0
+DIFF_CONTEXT=3
+DIFF_MAX_FILES=50
 
 # Exclusions for config push (relative to REPO_CONFIG_DIR root)
 EXCLUDES=(
@@ -71,6 +74,9 @@ Options:
   --git-branch B   Use branch B for pull (default: current branch)
   --allow-dirty    Proceed even if the working tree has uncommitted changes
   --stash          Auto-stash uncommitted changes before pull and pop after
+  --diff           For config deploy preflight, show unified diffs for changed text files
+  --diff-context N Diff context lines (default: 3)
+  --diff-max N     Max files to diff (default: 50)
   -h, --help       Show this help
 
 Env overrides:
@@ -101,6 +107,9 @@ while [[ $# -gt 0 ]]; do
     --git-branch) GIT_BRANCH="$2"; shift 2 ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
     --stash) AUTO_STASH=1; shift ;;
+    --diff) SHOW_DIFF=1; shift ;;
+    --diff-context) DIFF_CONTEXT="$2"; shift 2 ;;
+    --diff-max) DIFF_MAX_FILES="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -279,6 +288,64 @@ install_notmine() {
   local dest_py="$EXTRAS_DIR/xplorer.py"
 
   install_file_smart "$src_py" "$dest_py" "$NOTMINE_BACKUP_DIR"
+}
+
+show_preflight_diffs() {
+  local preflight_out="$1"
+
+  [[ $SHOW_DIFF -eq 1 ]] || return 0
+
+  require_cmd diff
+  # "file" is optional but helps skip binaries safely
+  command -v file >/dev/null 2>&1 || warn "Command 'file' not found; will diff without binary detection."
+
+  log "Diffs for changed files (repo -> printer):"
+
+  # Extract paths that rsync says will be transferred/updated.
+  # We only diff regular files that are being sent (">f") AND show signs of content change ("s" size) or checksum ("c")
+  # Format example: >f.st...... path
+  local -a paths=()
+  while IFS= read -r line; do
+    # skip deletions and dirs
+    [[ "$line" =~ ^\>f ]] || continue
+    # only show diffs for likely content changes (size or checksum differs)
+    # rsync itemize has "c" or "s" in the change positions; simplest: require an 's' or 'c' somewhere in the flags
+    [[ "$line" =~ ^\>f.*[cs].*\  ]] || continue
+
+    # path is after the last space(s)
+    local path="${line#* }"
+    path="${path#"${path%%[![:space:]]*}"}"  # trim leading spaces just in case
+    [[ -n "$path" ]] && paths+=("$path")
+  done <<< "$preflight_out"
+
+  if [[ ${#paths[@]} -eq 0 ]]; then
+    log "  (No content-changing regular files detected to diff.)"
+    return 0
+  fi
+
+  local shown=0
+  for p in "${paths[@]}"; do
+    (( shown >= DIFF_MAX_FILES )) && { warn "Diff limit reached ($DIFF_MAX_FILES files)."; break; }
+
+    local src="$REPO_CONFIG_DIR/$p"
+    local dst="$KLIPPERCONFIG/$p"
+
+    [[ -f "$src" ]] || continue
+    [[ -f "$dst" ]] || { log "---- $p (new file)"; continue; }
+
+    # Skip binaries if we have `file`
+    if command -v file >/dev/null 2>&1; then
+      if file --mime "$src" "$dst" | grep -qi 'charset=binary'; then
+        log "---- $p (binary; skipping diff)"
+        continue
+      fi
+    fi
+
+    log "---- $p"
+    # Use unified diff; tolerate non-zero exit when differences exist
+    diff -U "$DIFF_CONTEXT" --label "repo/$p" --label "printer/$p" "$dst" "$src" || true
+    ((shown++))
+  done
 }
 
 # --- Config deployment (tarball snapshots) -----------------------------------
