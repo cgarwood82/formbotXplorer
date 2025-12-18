@@ -238,7 +238,7 @@ mkdir -p "$EXTRAS_DIR" "$KLIPPERCONFIG"
 # --- NotMine deployment ------------------------------------------------------
 install_file_smart() {
   local src="$1"; local dest="$2"; local backup_root="$3"
-  local name; name
+  local name
   name=$(basename "$dest")
 
   if [[ ! -f "$src" ]]; then
