@@ -316,9 +316,19 @@ show_preflight_diffs() {
       continue
     fi
     if [[ ! -f "$dst" ]]; then
-      log "---- $p (new file on deploy)"
+      log "---- $p"
+      # diff returns:
+      #  0 = no differences
+      #  1 = differences found (normal)
+      #  2 = trouble (real error)
+      set +e
+      diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src"
+      rc=$?
+      set -e
+      if [[ $rc -eq 2 ]]; then
+        warn "diff error for $p (rc=2)"
+      fi
       ((shown++))
-      continue
     fi
 
     if command -v file >/dev/null 2>&1; then
