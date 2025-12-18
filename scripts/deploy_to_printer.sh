@@ -387,6 +387,7 @@ deploy_config() {
   if [[ $DRY_RUN -eq 1 ]]; then
     log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
     [[ -n "$preflight_out" ]] && echo "$preflight_out"
+    show_preflight_diffs "$preflight_out"
     return 0
   fi
 
