@@ -7,7 +7,6 @@
 # Requirements: rsync, tar, git (optional if --no-git), diff
 
 set -euo pipefail
-log "SCRIPT_PATH: ${BASH_SOURCE[0]}"
 
 # --- Discover paths ----------------------------------------------------------
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
