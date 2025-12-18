@@ -296,43 +296,16 @@ show_preflight_diffs() {
   [[ $SHOW_DIFF -eq 1 ]] || return 0
   require_cmd diff
 
-  # "file" is optional but helps skip binaries safely
   command -v file >/dev/null 2>&1 || warn "Command 'file' not found; will diff without binary detection."
 
   log "Diffs for changed files (repo -> printer):"
 
-  # Robustly extract paths from rsync itemize output:
-  # - first field is the 11-char itemize token (e.g. >f.st......)
-  # - rest of line is the path
-  # We only keep regular files being sent (>f) where flags contain s (size) or c (checksum).
-  local -a paths=()
-  while IFS= read -r p; do
-    # strip CR, trim whitespace
-    p="${p//$'\r'/}"
-    p="${p#"${p%%[![:space:]]*}"}"
-    p="${p%"${p##*[![:space:]]}"}"
-    [[ -n "$p" ]] && paths+=("$p")
-  done < <(
-    printf '%s\n' "$preflight_out" |
-      awk '
-        $1 ~ /^>f/ {
-          flags=$1
-          if (index(flags,"s") || index(flags,"c")) {
-            # print everything after the first field + space
-            sub(/^[^ ]+[ ]+/, "", $0)
-            print $0
-          }
-        }
-      '
-  )
-
-  if [[ ${#paths[@]} -eq 0 ]]; then
-    log "  (No content-changing regular files detected to diff.)"
-    return 0
-  fi
-
   local shown=0
-  for p in "${paths[@]}"; do
+  # Feed preflight_out through awk and read each path line-by-line
+  while IFS= read -r p; do
+    p="${p//$'\r'/}"
+    [[ -z "$p" ]] && continue
+
     (( shown >= DIFF_MAX_FILES )) && { warn "Diff limit reached ($DIFF_MAX_FILES files)."; break; }
 
     local src="$REPO_CONFIG_DIR/$p"
@@ -348,7 +321,6 @@ show_preflight_diffs() {
       continue
     fi
 
-    # Skip binaries if we have `file`
     if command -v file >/dev/null 2>&1; then
       if file --mime "$src" "$dst" | grep -qi 'charset=binary'; then
         log "---- $p (binary; skipping diff)"
@@ -358,12 +330,25 @@ show_preflight_diffs() {
     fi
 
     log "---- $p"
-    # diff order is: printer then repo
     diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src" || true
     ((shown++))
-  done
-}
+  done < <(
+    printf '%s\n' "$preflight_out" |
+      awk '
+        $1 ~ /^>f/ {
+          flags=$1
+          if (index(flags,"s") || index(flags,"c")) {
+            sub(/^[^ ]+[ ]+/, "", $0)
+            print $0
+          }
+        }
+      '
+  )
 
+  if [[ $shown -eq 0 ]]; then
+    log "  (No content-changing regular files detected to diff.)"
+  fi
+}
 
 # --- Config deployment (tarball snapshots) -----------------------------------
 snapshot_config_dir() {
