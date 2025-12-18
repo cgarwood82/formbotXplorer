@@ -313,7 +313,12 @@ show_preflight_diffs() {
 
     # Path begins at column 13 (0-based index 12): 11 flags + space
     local path="${line:12}"
+    # trim leading whitespace
     path="${path#"${path%%[![:space:]]*}"}"
+    # trim trailing whitespace
+    path="${path%"${path##*[![:space:]]}"}"
+    # strip CR if present (windowsy / weird terminal cases)
+    path="${path//$'\r'/}"
     [[ -n "$path" ]] && paths+=("$path")
   done <<< "$preflight_out"
 
