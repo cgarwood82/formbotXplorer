@@ -610,7 +610,7 @@ for row in "${PLAN_ROWS[@]}"; do
   log "\n=== $name: Building firmware (${board}) ==="
   cp -f "$cfg" "$KLIPPER_DIR/.config"
   pushd "$KLIPPER_DIR" >/dev/null
-  /use/bin/make olddefconfig
+  /usr/bin/make olddefconfig
   /usr/bin/make clean
   /usr/bin/make -j$(nproc)
 
