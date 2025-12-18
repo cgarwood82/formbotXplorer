@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Deploy changes from this repo to the printer.
-# Supports deploying NotMine artifacts and/or the repo's ./config tree.
-# Provides backups on the printer (and retains NotMine backups in repo),
-# safe dry-run mode, and sensible defaults.
+# - Deploys NotMine artifacts and/or the repo's ./config tree
+# - Uses a single tarball snapshot backup for the printer config dir before applying changes
+# - Keeps backups OUT of the repo and OUT of ~/printer_data/config
 #
-# Requirements: rsync
+# Requirements: rsync, tar, git (optional if --no-git)
 
 set -euo pipefail
 
@@ -16,18 +16,21 @@ PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 REPO_NOTMINE_DIR="${REPO_NOTMINE_DIR:-$PROJECT_ROOT/NotMine}"
 REPO_CONFIG_DIR="${REPO_CONFIG_DIR:-$PROJECT_ROOT/config}"
 
-# Printer-side
+# Printer-side (script is intended to run on the printer; can be overridden via env)
 PRINTER_HOME="${PRINTER_HOME:-$HOME}"
 EXTRAS_DIR="${EXTRAS_DIR:-$PRINTER_HOME/klipper/klippy/extras}"
 KLIPPERCONFIG="${KLIPPERCONFIG:-$PRINTER_HOME/printer_data/config}"
 
-# Backups
-# Destination for config backups on the printer side. Default under printer config.
+# Timestamp
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-DEFAULT_CONFIG_BACKUP_DIR="$KLIPPERCONFIG/.deploy_backups/$TIMESTAMP"
-CONFIG_BACKUP_DIR="${CONFIG_BACKUP_DIR:-$DEFAULT_CONFIG_BACKUP_DIR}"
-# NotMine backups stay in repo by default
-NOTMINE_BACKUP_DIR="${NOTMINE_BACKUP_DIR:-$REPO_NOTMINE_DIR/backup}"
+
+# Snapshots (tarball backups) - OUTSIDE printer_data/config and OUTSIDE repo
+SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-$PRINTER_HOME/.deploy_snapshots}"
+CONFIG_SNAPSHOT_DIR="$SNAPSHOT_ROOT/klipper_config"
+CONFIG_SNAPSHOT_FILE="$CONFIG_SNAPSHOT_DIR/config_${TIMESTAMP}.tgz"
+
+# Simple per-file backups for NotMine overwrites (optional, still outside repo)
+NOTMINE_BACKUP_DIR="${NOTMINE_BACKUP_DIR:-$SNAPSHOT_ROOT/notmine_files/$TIMESTAMP}"
 
 # Options / flags
 DO_NOTMINE=0
@@ -35,7 +38,6 @@ DO_CONFIG=0
 DRY_RUN=0
 DELETE_FLAG=1           # 1=mirror deletions for config
 VERBOSE=0
-NO_BACKUP=0
 CONFIRM=0
 GIT_PULL=1              # 1=perform git pull before deploying
 GIT_REMOTE=""
@@ -43,10 +45,10 @@ GIT_BRANCH=""
 ALLOW_DIRTY=0
 AUTO_STASH=0
 
-# Exclusions for config push
+# Exclusions for config push (relative to REPO_CONFIG_DIR root)
 EXCLUDES=(
-  "0_Xplorer/"     # user requested omit; managed elsewhere
-  ".deploy_backups/"
+  "0_Xplorer/"          # managed separately in this repo; omit from deploy
+  ".deploy_backups/"    # legacy (in case it exists)
 )
 
 usage() {
@@ -55,15 +57,13 @@ Usage: $(basename "$0") [--all|--notmine|--config] [options]
 
 Targets (choose one, default: --all):
   --all            Deploy NotMine and config
-  --notmine        Deploy only NotMine artifacts (xplorer.py, variables.cfg)
+  --notmine        Deploy only NotMine artifacts (xplorer.py)
   --config         Deploy only repo ./config to printer's config dir
 
 Options:
   --dry-run        Show what would change without modifying files
   --no-delete      For config deploy, do not delete files removed in repo
   --verbose        Verbose output
-  --no-backup      Do not create backups prior to overwrites/deletions
-  --backup-dir DIR Backup directory on printer for config deploy (default: $DEFAULT_CONFIG_BACKUP_DIR)
   --confirm        Ask for confirmation before performing actions (also used to auto-approve preflight)
   --no-git         Skip git checks and pulling before deployment
   --git-pull       Force running git pull preflight (default behavior)
@@ -79,15 +79,13 @@ Env overrides:
   PRINTER_HOME       (default: $HOME)
   EXTRAS_DIR         (default: $PRINTER_HOME/klipper/klippy/extras)
   KLIPPERCONFIG      (default: $PRINTER_HOME/printer_data/config)
-  CONFIG_BACKUP_DIR  (default: $DEFAULT_CONFIG_BACKUP_DIR)
-  NOTMINE_BACKUP_DIR (default: $REPO_NOTMINE_DIR/backup)
+  SNAPSHOT_ROOT      (default: $PRINTER_HOME/.deploy_snapshots)
+  NOTMINE_BACKUP_DIR (default: \$SNAPSHOT_ROOT/notmine_files/$TIMESTAMP)
 USAGE
 }
 
 # --- Arg parsing -------------------------------------------------------------
-# Track if a target was explicitly selected; default to --all if none.
 TARGET_SET=0
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all) DO_NOTMINE=1; DO_CONFIG=1; TARGET_SET=1; shift ;;
@@ -96,8 +94,6 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1; shift ;;
     --no-delete) DELETE_FLAG=0; shift ;;
     --verbose) VERBOSE=1; shift ;;
-    --no-backup) NO_BACKUP=1; shift ;;
-    --backup-dir) CONFIG_BACKUP_DIR="$2"; shift 2 ;;
     --confirm) CONFIRM=1; shift ;;
     --no-git) GIT_PULL=0; shift ;;
     --git-pull) GIT_PULL=1; shift ;;
@@ -111,7 +107,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $TARGET_SET -eq 0 ]]; then
-  # No explicit target provided; default to deploying both NotMine and config
   DO_NOTMINE=1; DO_CONFIG=1
 fi
 
@@ -124,6 +119,7 @@ trap 'fail "An unexpected error occurred (line $LINENO)."' ERR
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
 require_cmd rsync
+require_cmd tar
 
 confirm_or_exit() {
   [[ $CONFIRM -eq 1 && $DRY_RUN -eq 0 ]] || return 0
@@ -136,7 +132,6 @@ confirm_or_exit() {
 
 confirm_with_message() {
   # $1: message to display before confirmation
-  # Returns 0 to proceed, exits 0 otherwise
   if [[ $DRY_RUN -eq 1 ]]; then
     return 0
   fi
@@ -150,7 +145,6 @@ confirm_with_message() {
 
 # --- Git preflight -----------------------------------------------------------
 STASH_MADE=0
-GIT_HEAD_BEFORE=""
 
 is_git_repo() { git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
 
@@ -200,10 +194,8 @@ git_preflight() {
     fi
   fi
 
-  # Fetch and fast-forward pull
   git -C "$PROJECT_ROOT" fetch "$remote" "$branch" || fail "git fetch failed."
 
-  # Show ahead/behind
   local upstream="$remote/$branch"
   if git -C "$PROJECT_ROOT" rev-parse "$upstream" >/dev/null 2>&1; then
     local counts
@@ -214,8 +206,6 @@ git_preflight() {
   if ! git -C "$PROJECT_ROOT" pull --ff-only "$remote" "$branch"; then
     fail "git pull failed (non fast-forward?). Resolve and retry or run with --no-git."
   fi
-
-  GIT_HEAD_BEFORE=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "")
 }
 
 # rsync convenience
@@ -223,7 +213,7 @@ rsync_base=("-a" "--human-readable" "--info=stats1,NAME")
 [[ $VERBOSE -eq 1 ]] && rsync_base+=("-v")
 [[ $DRY_RUN -eq 1 ]] && rsync_base+=("-n")
 
-# Excludes array -> args
+# Excludes -> args
 exclude_args=()
 for ex in "${EXCLUDES[@]}"; do
   exclude_args+=("--exclude=$ex")
@@ -237,19 +227,6 @@ done
 mkdir -p "$EXTRAS_DIR" "$KLIPPERCONFIG"
 
 # --- NotMine deployment ------------------------------------------------------
-install_notmine() {
-  local src_py="$REPO_NOTMINE_DIR/xplorer.py"
-  local src_cfg="$REPO_NOTMINE_DIR/variables.cfg"
-  local dest_py="$EXTRAS_DIR/xplorer.py"
-  local dest_cfg="$KLIPPERCONFIG/variables.cfg"
-
-  mkdir -p "$NOTMINE_BACKUP_DIR"
-
-  install_file_smart "$src_py" "$dest_py" "$NOTMINE_BACKUP_DIR"
-  install_file_smart "$src_cfg" "$dest_cfg" "$NOTMINE_BACKUP_DIR"
-}
-
-# Smart file installer with backups that skip empty destination files
 install_file_smart() {
   local src="$1"; local dest="$2"; local backup_root="$3"
   local name; name=$(basename "$dest")
@@ -264,9 +241,7 @@ install_file_smart() {
   if [[ $DRY_RUN -eq 1 ]]; then
     if [[ -e "$dest" ]]; then
       if ! cmp -s "$src" "$dest"; then
-        if [[ -s "$dest" && $NO_BACKUP -eq 0 ]]; then
-          log "DRY-RUN: would back up $dest -> $backup_root/${name}.${TIMESTAMP}.bak"
-        fi
+        log "DRY-RUN: would back up $dest -> $backup_root/${name}.${TIMESTAMP}.bak"
         log "DRY-RUN: would update $dest from $src"
       else
         log "DRY-RUN: $name already up to date"
@@ -279,13 +254,14 @@ install_file_smart() {
 
   if [[ -e "$dest" ]]; then
     if ! cmp -s "$src" "$dest"; then
-      if [[ -s "$dest" && $NO_BACKUP -eq 0 ]]; then
-        mkdir -p "$backup_root"
-        local backup_path="$backup_root/${name}.${TIMESTAMP}.bak"
+      mkdir -p "$backup_root"
+      local backup_path="$backup_root/${name}.${TIMESTAMP}.bak"
+      # Only back up non-empty dest files
+      if [[ -s "$dest" ]]; then
         cp -f -- "$dest" "$backup_path"
         log "Backed up $dest -> $backup_path"
       else
-        log "Destination $dest is empty or backups disabled; skipping backup."
+        log "Destination $dest is empty; skipping backup copy."
       fi
       cp -f -- "$src" "$dest"
       log "Updated $dest from $src"
@@ -298,34 +274,30 @@ install_file_smart() {
   fi
 }
 
-# --- Config deployment -------------------------------------------------------
+install_notmine() {
+  local src_py="$REPO_NOTMINE_DIR/xplorer.py"
+  local dest_py="$EXTRAS_DIR/xplorer.py"
+
+  install_file_smart "$src_py" "$dest_py" "$NOTMINE_BACKUP_DIR"
+}
+
+# --- Config deployment (tarball snapshots) -----------------------------------
+snapshot_config_dir() {
+  mkdir -p "$CONFIG_SNAPSHOT_DIR"
+  log "Creating config snapshot: $CONFIG_SNAPSHOT_FILE"
+  tar -C "$KLIPPERCONFIG" -czf "$CONFIG_SNAPSHOT_FILE" . || fail "Snapshot tar failed."
+}
+
 deploy_config() {
   [[ -d "$REPO_CONFIG_DIR" ]] || fail "Repo config directory not found: $REPO_CONFIG_DIR"
 
   local -a args=("${rsync_base[@]}" "--prune-empty-dirs")
-  if [[ $DELETE_FLAG -eq 1 ]]; then
-    args+=("--delete")
-    # If backups enabled, keep overwritten/deleted files
-    if [[ $NO_BACKUP -eq 0 ]]; then
-      args+=("--backup" "--backup-dir=$CONFIG_BACKUP_DIR")
-    fi
-  else
-    # Even without --delete, back up overwritten files if enabled
-    if [[ $NO_BACKUP -eq 0 ]]; then
-      args+=("--backup" "--backup-dir=$CONFIG_BACKUP_DIR")
-    fi
-  fi
-
+  [[ $DELETE_FLAG -eq 1 ]] && args+=("--delete")
   args+=("${exclude_args[@]}")
 
-  # Ensure backup directory exists on real runs
-  if [[ $DRY_RUN -eq 0 && $NO_BACKUP -eq 0 ]]; then
-    mkdir -p "$CONFIG_BACKUP_DIR"
-  fi
-
   log "Deploying repo config -> $KLIPPERCONFIG"
-  log "  delete: $([[ $DELETE_FLAG -eq 1 ]] && echo yes || echo no)  backups: $([[ $NO_BACKUP -eq 0 ]] && echo yes || echo no)"
-  log "  backup dir: $([[ $NO_BACKUP -eq 0 ]] && echo "$CONFIG_BACKUP_DIR" || echo "(disabled)")"
+  log "  delete: $([[ $DELETE_FLAG -eq 1 ]] && echo yes || echo no)"
+  log "  snapshot: $([[ $DRY_RUN -eq 0 ]] && echo "$CONFIG_SNAPSHOT_FILE" || echo "(skipped: dry-run)")"
 
   # Safety: avoid destructive delete when source is empty unless explicitly confirmed
   if [[ $DELETE_FLAG -eq 1 && $DRY_RUN -eq 0 && $CONFIRM -eq 0 ]]; then
@@ -334,80 +306,66 @@ deploy_config() {
     fi
   fi
 
-  # Preflight: run rsync dry-run to summarize actions (overwrites/creates/deletes)
+  # Preflight: rsync dry-run itemized
   local -a preflight_args=("${args[@]}")
-  # Ensure dry-run and itemized changes are on for preflight
   preflight_args+=("-n" "--itemize-changes")
   local preflight_out
   preflight_out=$(rsync "${preflight_args[@]}" "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/" || true)
 
-  # Summarize changes
   local deletes updates total
   deletes=$(echo "$preflight_out" | grep -c '^\*deleting ' || true)
-  # Count non-empty lines that look like itemized changes (start with [<>cdhs.]) excluding *deleting
   updates=$(echo "$preflight_out" | grep -E '^[<>cdhs\.].' | grep -v '^\*deleting ' | wc -l | tr -d ' ')
   total=$((deletes + updates))
 
   if [[ $DRY_RUN -eq 1 ]]; then
     log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
-    # Show details in dry-run
-    if [[ -n "$preflight_out" ]]; then
-      echo "$preflight_out"
-    fi
+    [[ -n "$preflight_out" ]] && echo "$preflight_out"
     return 0
   fi
 
   if (( total > 0 )); then
     log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
     if [[ $CONFIRM -eq 0 ]]; then
-      confirm_with_message "About to apply the above changes to $KLIPPERCONFIG. Use --no-delete to avoid deletions or --dry-run to preview."
+      confirm_with_message "About to apply the above changes to:\n  $KLIPPERCONFIG\nA tar snapshot will be created first at:\n  $CONFIG_SNAPSHOT_FILE\nUse --dry-run to preview or --no-delete to avoid deletions."
     fi
   else
     log "Preflight summary: no changes needed."
+    return 0
   fi
 
-  # Push everything under repo config to the printer config
+  # Snapshot then deploy
+  snapshot_config_dir
   rsync "${args[@]}" "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/"
-
-  if [[ $DRY_RUN -eq 0 && $NO_BACKUP -eq 0 ]]; then
-    # Optional cleanup: remove zero-length files from backup dir to align with
-    # the policy of skipping empty destination files.
-    find "$CONFIG_BACKUP_DIR" -type f -size 0 -print -delete 2>/dev/null || true
-  fi
+  log "Config deployment complete. Snapshot saved at: $CONFIG_SNAPSHOT_FILE"
 }
 
 # --- Main --------------------------------------------------------------------
-log "Repo:          $PROJECT_ROOT"
-log "NotMine dir:   $REPO_NOTMINE_DIR"
-log "Repo config:   $REPO_CONFIG_DIR"
-log "Printer home:  $PRINTER_HOME"
-log "Extras:        $EXTRAS_DIR"
-log "Printer config:$KLIPPERCONFIG"
-log "Dry-run:       $([[ $DRY_RUN -eq 1 ]] && echo yes || echo no)"
-log "Verbose:       $([[ $VERBOSE -eq 1 ]] && echo yes || echo no)"
-log "Targets:       NotMine=$([[ $DO_NOTMINE -eq 1 ]] && echo yes || echo no), Config=$([[ $DO_CONFIG -eq 1 ]] && echo yes || echo no)"
-log "Git preflight: $([[ $GIT_PULL -eq 1 ]] && echo enabled || echo disabled)"
+log "Repo:           $PROJECT_ROOT"
+log "NotMine dir:    $REPO_NOTMINE_DIR"
+log "Repo config:    $REPO_CONFIG_DIR"
+log "Printer home:   $PRINTER_HOME"
+log "Extras:         $EXTRAS_DIR"
+log "Printer config: $KLIPPERCONFIG"
+log "Snapshots root: $SNAPSHOT_ROOT"
+log "Dry-run:        $([[ $DRY_RUN -eq 1 ]] && echo yes || echo no)"
+log "Verbose:        $([[ $VERBOSE -eq 1 ]] && echo yes || echo no)"
+log "Targets:        NotMine=$([[ $DO_NOTMINE -eq 1 ]] && echo yes || echo no), Config=$([[ $DO_CONFIG -eq 1 ]] && echo yes || echo no)"
+log "Git preflight:  $([[ $GIT_PULL -eq 1 ]] && echo enabled || echo disabled)"
 
-# Run git preflight early to ensure repo is up-to-date before computing any preflight diffs
 git_preflight
-
 confirm_or_exit
-
-changed_any=0
 
 if [[ $DO_NOTMINE -eq 1 ]]; then
   log "--- Deploy NotMine ---"
   install_notmine
-  changed_any=1 # we don't compute diffs precisely here; consider deployment act
 fi
 
 if [[ $DO_CONFIG -eq 1 ]]; then
   log "--- Deploy config ---"
   deploy_config
-  changed_any=1
 fi
 
-# Pop stash if we created one
+# Restore stash if we made one
 if [[ $STASH_MADE -eq 1 && $DRY_RUN -eq 0 ]]; then
   log "Git: restoring stashed changes"
   git -C "$PROJECT_ROOT" stash pop -q || warn "Git: failed to pop stash; your changes remain stashed."
