@@ -252,7 +252,7 @@ resolve_board_profile() {
 
 # Verify passwordless sudo (no prompt) for 'make'.
 check_passwordless_sudo() {
-  if sudo -n true 2>/dev/null && (cd "$KLIPPER_DIR" && sudo -n make --version >/dev/null 2>&1); then
+  if sudo -n true 2>/dev/null && (cd "$KLIPPER_DIR" && sudo -n /usr/bin/make --version >/dev/null 2>&1); then
     return 0
   fi
   return 1
@@ -610,16 +610,16 @@ for row in "${PLAN_ROWS[@]}"; do
   log "\n=== $name: Building firmware (${board}) ==="
   cp -f "$cfg" "$KLIPPER_DIR/.config"
   pushd "$KLIPPER_DIR" >/dev/null
-  make olddefconfig
-  make clean
-  make -j$(nproc)
+  /use/bin/make olddefconfig
+  /usr/bin/make clean
+  /usr/bin/make -j$(nproc)
 
   log "Flashing $name ..."
   if [[ "$type" == "serial" ]]; then
     # Soft-handle known dfu-util leave timing error after successful download
     set +e
     flash_log=$(mktemp)
-    sudo -n make flash FLASH_DEVICE="$id" |& tee "$flash_log"
+    sudo -n /usr/bin/make flash FLASH_DEVICE="$id" |& tee "$flash_log"
     rc=${PIPESTATUS[0]}
     set -e
     if (( rc != 0 )); then
