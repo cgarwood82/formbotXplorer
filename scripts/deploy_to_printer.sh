@@ -310,10 +310,10 @@ show_preflight_diffs() {
     [[ "$line" =~ ^\>f ]] || continue
     # only show diffs for likely content changes (size or checksum differs)
     # rsync itemize has "c" or "s" in the change positions; simplest: require an 's' or 'c' somewhere in the flags
-    [[ "$line" =~ ^\>f.*[cs].*\  ]] || continue
+    [[ "$line" =~ ^\>f.*[cs] ]] || continue
 
     # path is after the last space(s)
-    local path="${line#* }"
+    local path="${line:12}"
     path="${path#"${path%%[![:space:]]*}"}"  # trim leading spaces just in case
     [[ -n "$path" ]] && paths+=("$path")
   done <<< "$preflight_out"
@@ -343,7 +343,7 @@ show_preflight_diffs() {
 
     log "---- $p"
     # Use unified diff; tolerate non-zero exit when differences exist
-    diff -U "$DIFF_CONTEXT" --label "repo/$p" --label "printer/$p" "$dst" "$src" || true
+    diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src" || true
     ((shown++))
   done
 }
