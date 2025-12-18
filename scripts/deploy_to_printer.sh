@@ -197,7 +197,7 @@ install_notmine() {
     return 0
   fi
 
-  if [[ -f "$dst_py" && ! cmp -s "$src_py" "$dst_py" ]]; then
+  if [[ -f "" ]] && ! cmp -s "" ""; then
     cp -f "$dst_py" "$NOTMINE_BACKUP_DIR/xplorer.py.${TIMESTAMP}.bak" || true
   fi
 
