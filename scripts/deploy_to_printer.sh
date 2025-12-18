@@ -4,131 +4,94 @@
 # - Uses a single tarball snapshot backup for the printer config dir before applying changes
 # - Keeps backups OUT of the repo and OUT of ~/printer_data/config
 #
-# Requirements: rsync, tar, git (optional if --no-git), diff
+# Requirements: rsync, tar, diff; git optional unless --no-git
 
 set -euo pipefail
 
-# --- Discover paths ----------------------------------------------------------
+# ------------------------- Paths -------------------------
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 
-# Repo-side
 REPO_NOTMINE_DIR="${REPO_NOTMINE_DIR:-$PROJECT_ROOT/NotMine}"
 REPO_CONFIG_DIR="${REPO_CONFIG_DIR:-$PROJECT_ROOT/config}"
 
-# Printer-side (script is intended to run on the printer; can be overridden via env)
 PRINTER_HOME="${PRINTER_HOME:-$HOME}"
 EXTRAS_DIR="${EXTRAS_DIR:-$PRINTER_HOME/klipper/klippy/extras}"
 KLIPPERCONFIG="${KLIPPERCONFIG:-$PRINTER_HOME/printer_data/config}"
 
-# Timestamp
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 
-# Snapshots (tarball backups) - OUTSIDE printer_data/config and OUTSIDE repo
 SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-$PRINTER_HOME/.deploy_snapshots}"
 CONFIG_SNAPSHOT_DIR="$SNAPSHOT_ROOT/klipper_config"
 CONFIG_SNAPSHOT_FILE="$CONFIG_SNAPSHOT_DIR/config_${TIMESTAMP}.tgz"
 
-# Simple per-file backups for NotMine overwrites (optional, still outside repo)
 NOTMINE_BACKUP_DIR="${NOTMINE_BACKUP_DIR:-$SNAPSHOT_ROOT/notmine_files/$TIMESTAMP}"
 
-# Options / flags
+# ------------------------- Options -------------------------
 DO_NOTMINE=0
 DO_CONFIG=0
 DRY_RUN=0
-DELETE_FLAG=1           # 1=mirror deletions for config
+DELETE_FLAG=1
 VERBOSE=0
 CONFIRM=0
-GIT_PULL=1              # 1=perform git pull before deploying
+
+GIT_PULL=1
 GIT_REMOTE=""
 GIT_BRANCH=""
 ALLOW_DIRTY=0
 AUTO_STASH=0
+
 SHOW_DIFF=0
 DIFF_CONTEXT=3
-DIFF_MAX_FILES=50
+DIFF_MAX_FILES=200
 
-# Exclusions for config push (relative to REPO_CONFIG_DIR root)
 EXCLUDES=(
-  "0_Xplorer/"          # managed separately in this repo; omit from deploy
-  ".deploy_backups/"    # legacy (in case it exists)
+  "0_Xplorer/"
+  ".deploy_backups/"
 )
+
+# ------------------------- Helpers -------------------------
+log()  { echo -e "[deploy] $*"; }
+warn() { echo -e "[deploy:WARN] $*"; }
+fail() { echo -e "[deploy:ERROR] $*" >&2; exit 1; }
+
+trap 'fail "Unexpected error on line $LINENO."' ERR
+
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
+require_cmd rsync
+require_cmd tar
+require_cmd diff
 
 usage() {
   cat <<USAGE
 Usage: $(basename "$0") [--all|--notmine|--config] [options]
 
-Targets (choose one, default: --all):
+Targets (default: --all):
   --all            Deploy NotMine and config
-  --notmine        Deploy only NotMine artifacts (xplorer.py)
-  --config         Deploy only repo ./config to printer's config dir
+  --notmine        Deploy only NotMine (xplorer.py)
+  --config         Deploy only repo ./config
 
 Options:
-  --dry-run        Show what would change without modifying files
-  --no-delete      For config deploy, do not delete files removed in repo
-  --verbose        Verbose output
-  --confirm        Ask for confirmation before performing actions (also used to auto-approve preflight)
-  --no-git         Skip git checks and pulling before deployment
-  --git-pull       Force running git pull preflight (default behavior)
-  --git-remote R   Use remote R for pull (default: origin if present)
-  --git-branch B   Use branch B for pull (default: current branch)
-  --allow-dirty    Proceed even if the working tree has uncommitted changes
-  --stash          Auto-stash uncommitted changes before pull and pop after
-  --diff           For config deploy preflight (dry-run), show unified diffs for changed text files
+  --dry-run        Show what would change (no modifications)
+  --diff           In dry-run, show unified diffs for changed files
   --diff-context N Diff context lines (default: 3)
-  --diff-max N     Max files to diff (default: 50)
-  -h, --help       Show this help
+  --diff-max N     Max files to diff (default: 200)
+  --no-delete      Do not delete printer files missing from repo config
+  --verbose        Verbose rsync
+  --confirm        Ask for confirmation before modifying anything
+
+Git options:
+  --no-git         Skip git checks/pull
+  --git-remote R   Remote for pull
+  --git-branch B   Branch for pull
+  --allow-dirty    Proceed with uncommitted changes
+  --stash          Auto-stash before pull and pop after
 
 Env overrides:
-  REPO_NOTMINE_DIR   (default: $PROJECT_ROOT/NotMine)
-  REPO_CONFIG_DIR    (default: $PROJECT_ROOT/config)
-  PRINTER_HOME       (default: $HOME)
-  EXTRAS_DIR         (default: $PRINTER_HOME/klipper/klippy/extras)
-  KLIPPERCONFIG      (default: $PRINTER_HOME/printer_data/config)
-  SNAPSHOT_ROOT      (default: $PRINTER_HOME/.deploy_snapshots)
-  NOTMINE_BACKUP_DIR (default: \$SNAPSHOT_ROOT/notmine_files/$TIMESTAMP)
+  REPO_NOTMINE_DIR, REPO_CONFIG_DIR, PRINTER_HOME, EXTRAS_DIR, KLIPPERCONFIG,
+  SNAPSHOT_ROOT, NOTMINE_BACKUP_DIR
 USAGE
 }
-
-# --- Arg parsing -------------------------------------------------------------
-TARGET_SET=0
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --all) DO_NOTMINE=1; DO_CONFIG=1; TARGET_SET=1; shift ;;
-    --notmine) DO_NOTMINE=1; DO_CONFIG=0; TARGET_SET=1; shift ;;
-    --config) DO_NOTMINE=0; DO_CONFIG=1; TARGET_SET=1; shift ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    --no-delete) DELETE_FLAG=0; shift ;;
-    --verbose) VERBOSE=1; shift ;;
-    --confirm) CONFIRM=1; shift ;;
-    --no-git) GIT_PULL=0; shift ;;
-    --git-pull) GIT_PULL=1; shift ;;
-    --git-remote) GIT_REMOTE="$2"; shift 2 ;;
-    --git-branch) GIT_BRANCH="$2"; shift 2 ;;
-    --allow-dirty) ALLOW_DIRTY=1; shift ;;
-    --stash) AUTO_STASH=1; shift ;;
-    --diff) SHOW_DIFF=1; shift ;;
-    --diff-context) DIFF_CONTEXT="$2"; shift 2 ;;
-    --diff-max) DIFF_MAX_FILES="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
-  esac
-done
-
-if [[ $TARGET_SET -eq 0 ]]; then
-  DO_NOTMINE=1; DO_CONFIG=1
-fi
-
-# --- Helpers -----------------------------------------------------------------
-log() { echo -e "[deploy] $*"; }
-warn() { echo -e "[deploy:WARN] $*"; }
-fail() { echo "[deploy:ERROR] $*" >&2; exit 1; }
-
-trap 'fail "An unexpected error occurred (line $LINENO)."' ERR
-
-require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
-require_cmd rsync
-require_cmd tar
 
 confirm_or_exit() {
   [[ $CONFIRM -eq 1 && $DRY_RUN -eq 0 ]] || return 0
@@ -139,195 +102,155 @@ confirm_or_exit() {
   esac
 }
 
-confirm_with_message() {
-  # $1: message to display before confirmation
-  if [[ $DRY_RUN -eq 1 ]]; then
-    return 0
-  fi
-  echo -e "$1"
-  read -r -p "Proceed? [y/N] " reply
-  case "$reply" in
-    y|Y|yes|YES) return 0 ;;
-    *) log "Cancelled."; exit 0 ;;
-  esac
-}
+# ------------------------- Arg parsing -------------------------
+TARGET_SET=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) DO_NOTMINE=1; DO_CONFIG=1; TARGET_SET=1; shift ;;
+    --notmine) DO_NOTMINE=1; DO_CONFIG=0; TARGET_SET=1; shift ;;
+    --config) DO_NOTMINE=0; DO_CONFIG=1; TARGET_SET=1; shift ;;
 
-# --- Git preflight -----------------------------------------------------------
+    --dry-run) DRY_RUN=1; shift ;;
+    --diff) SHOW_DIFF=1; shift ;;
+    --diff-context) DIFF_CONTEXT="$2"; shift 2 ;;
+    --diff-max) DIFF_MAX_FILES="$2"; shift 2 ;;
+    --no-delete) DELETE_FLAG=0; shift ;;
+    --verbose) VERBOSE=1; shift ;;
+    --confirm) CONFIRM=1; shift ;;
+
+    --no-git) GIT_PULL=0; shift ;;
+    --git-remote) GIT_REMOTE="$2"; shift 2 ;;
+    --git-branch) GIT_BRANCH="$2"; shift 2 ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
+    --stash) AUTO_STASH=1; shift ;;
+
+    -h|--help) usage; exit 0 ;;
+    *) fail "Unknown option: $1" ;;
+  esac
+done
+
+if [[ $TARGET_SET -eq 0 ]]; then
+  DO_NOTMINE=1; DO_CONFIG=1
+fi
+
+# ------------------------- Git preflight -------------------------
 STASH_MADE=0
 
 is_git_repo() { git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
+current_branch() { git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null; }
 
 choose_git_remote() {
   if [[ -n "$GIT_REMOTE" ]]; then echo "$GIT_REMOTE"; return; fi
-  local def
-  def=$(git -C "$PROJECT_ROOT" remote 2>/dev/null | head -n1)
-  if git -C "$PROJECT_ROOT" remote | grep -q "^origin$"; then
-    echo origin
-  else
-    echo "$def"
-  fi
+  if git -C "$PROJECT_ROOT" remote | grep -q '^origin$'; then echo origin; return; fi
+  git -C "$PROJECT_ROOT" remote 2>/dev/null | head -n1
 }
-
-current_branch() { git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null; }
 
 git_preflight() {
   [[ $GIT_PULL -eq 1 ]] || return 0
   if ! is_git_repo; then
-    warn "Project is not a Git repo; skipping git pull."
+    warn "Not a git repo; skipping git pull."
     return 0
   fi
-
   require_cmd git
 
   local branch remote
   branch=${GIT_BRANCH:-$(current_branch)}
   remote=$(choose_git_remote)
 
-  if [[ -z "$remote" || -z "$branch" ]]; then
-    warn "Unable to determine git remote/branch; skipping git pull."
-    return 0
-  fi
+  [[ -n "$branch" && -n "$remote" ]] || { warn "Cannot determine git remote/branch; skipping."; return 0; }
 
   log "Git: branch=$branch remote=$remote (preflight)"
 
-  # Check working tree cleanliness
   if ! git -C "$PROJECT_ROOT" diff --quiet || ! git -C "$PROJECT_ROOT" diff --cached --quiet; then
     if [[ $AUTO_STASH -eq 1 && $DRY_RUN -eq 0 ]]; then
-      log "Git: auto-stashing local changes"
       git -C "$PROJECT_ROOT" stash push -u -k -m "deploy_to_printer autostash $TIMESTAMP" >/dev/null || true
       STASH_MADE=1
+      log "Git: stashed local changes"
     elif [[ $ALLOW_DIRTY -eq 1 ]]; then
-      warn "Git: proceeding with dirty working tree (per --allow-dirty)."
+      warn "Git: dirty tree allowed (--allow-dirty)"
     else
-      fail "Git working tree has uncommitted changes. Use --allow-dirty or --stash to proceed."
+      fail "Git working tree dirty. Use --allow-dirty or --stash."
     fi
   fi
 
-  git -C "$PROJECT_ROOT" fetch "$remote" "$branch" || fail "git fetch failed."
-
-  local upstream="$remote/$branch"
-  if git -C "$PROJECT_ROOT" rev-parse "$upstream" >/dev/null 2>&1; then
-    local counts
-    counts=$(git -C "$PROJECT_ROOT" rev-list --left-right --count "$branch...$upstream" 2>/dev/null || echo "0	0")
-    log "Git: ahead/behind (local...remote): $counts"
-  fi
-
+  git -C "$PROJECT_ROOT" fetch "$remote" "$branch" || fail "git fetch failed"
   if ! git -C "$PROJECT_ROOT" pull --ff-only "$remote" "$branch"; then
-    fail "git pull failed (non fast-forward?). Resolve and retry or run with --no-git."
+    fail "git pull failed (non-fast-forward). Use --no-git or fix branch."
   fi
 }
 
-# rsync convenience
-rsync_base=("-a" "--human-readable" "--info=stats1,NAME")
-[[ $VERBOSE -eq 1 ]] && rsync_base+=("-v")
-[[ $DRY_RUN -eq 1 ]] && rsync_base+=("-n")
-
-# Excludes -> args
-exclude_args=()
-for ex in "${EXCLUDES[@]}"; do
-  exclude_args+=("--exclude=$ex")
-done
-
-# --- Validation --------------------------------------------------------------
-[[ -d "$PROJECT_ROOT" ]] || fail "Project root not found: $PROJECT_ROOT"
-[[ -d "$REPO_NOTMINE_DIR" ]] || warn "NotMine directory not found: $REPO_NOTMINE_DIR"
-[[ -d "$REPO_CONFIG_DIR" ]] || warn "Repo config directory not found: $REPO_CONFIG_DIR"
-
-mkdir -p "$EXTRAS_DIR" "$KLIPPERCONFIG"
-
-# --- NotMine deployment ------------------------------------------------------
-install_file_smart() {
-  local src="$1"; local dest="$2"; local backup_root="$3"
-  local name
-  name=$(basename "$dest")
-
-  if [[ ! -f "$src" ]]; then
-    warn "Skip (source missing): $src"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$dest")"
-
-  if [[ $DRY_RUN -eq 1 ]]; then
-    if [[ -e "$dest" ]]; then
-      if ! cmp -s "$src" "$dest"; then
-        log "DRY-RUN: would back up $dest -> $backup_root/${name}.${TIMESTAMP}.bak"
-        log "DRY-RUN: would update $dest from $src"
-      else
-        log "DRY-RUN: $name already up to date"
-      fi
-    else
-      log "DRY-RUN: would install $dest from $src"
-    fi
-    return 0
-  fi
-
-  if [[ -e "$dest" ]]; then
-    if ! cmp -s "$src" "$dest"; then
-      mkdir -p "$backup_root"
-      local backup_path="$backup_root/${name}.${TIMESTAMP}.bak"
-      if [[ -s "$dest" ]]; then
-        cp -f -- "$dest" "$backup_path"
-        log "Backed up $dest -> $backup_path"
-      else
-        log "Destination $dest is empty; skipping backup copy."
-      fi
-      cp -f -- "$src" "$dest"
-      log "Updated $dest from $src"
-    else
-      log "No changes for $name; already up to date."
-    fi
-  else
-    cp -f -- "$src" "$dest"
-    log "Installed $dest"
-  fi
-}
-
+# ------------------------- NotMine deploy -------------------------
 install_notmine() {
   local src_py="$REPO_NOTMINE_DIR/xplorer.py"
-  local dest_py="$EXTRAS_DIR/xplorer.py"
-  install_file_smart "$src_py" "$dest_py" "$NOTMINE_BACKUP_DIR"
+  local dst_py="$EXTRAS_DIR/xplorer.py"
+
+  [[ -f "$src_py" ]] || { warn "Skip NotMine (missing): $src_py"; return 0; }
+
+  mkdir -p "$EXTRAS_DIR" "$NOTMINE_BACKUP_DIR"
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ -f "$dst_py" ]] && cmp -s "$src_py" "$dst_py"; then
+      log "DRY-RUN: xplorer.py already up to date"
+    else
+      log "DRY-RUN: would install/update xplorer.py -> $dst_py"
+    fi
+    return 0
+  fi
+
+  if [[ -f "$dst_py" && ! cmp -s "$src_py" "$dst_py" ]]; then
+    cp -f "$dst_py" "$NOTMINE_BACKUP_DIR/xplorer.py.${TIMESTAMP}.bak" || true
+  fi
+
+  cp -f "$src_py" "$dst_py"
+  log "Installed NotMine: $dst_py"
 }
 
-# --- Diff helper -------------------------------------------------------------
-show_preflight_diffs() {
-  local preflight_out="$1"
+# ------------------------- Snapshot -------------------------
+snapshot_config_dir() {
+  mkdir -p "$CONFIG_SNAPSHOT_DIR"
+  log "Creating config snapshot: $CONFIG_SNAPSHOT_FILE"
+  tar -C "$KLIPPERCONFIG" -czf "$CONFIG_SNAPSHOT_FILE" . || fail "Snapshot tar failed."
+}
 
-  [[ $SHOW_DIFF -eq 1 ]] || return 0
-  require_cmd diff
+# ------------------------- Diff listing (robust) -------------------------
+# We use rsync --out-format to emit ONLY the changed file path, one per line.
+# This avoids parsing itemize glyphs entirely.
+collect_changed_files() {
+  local -a rsync_args=()
+  rsync_args+=("-a" "--prune-empty-dirs")
+  [[ $DELETE_FLAG -eq 1 ]] && rsync_args+=("--delete")
+  [[ $VERBOSE -eq 1 ]] && rsync_args+=("-v")
+
+  for ex in "${EXCLUDES[@]}"; do
+    rsync_args+=("--exclude=$ex")
+  done
+
+  # Only list files that would be sent (non-deletions). Out-format prints "%n" = filename.
+  rsync "${rsync_args[@]}" -n \
+    --out-format='%n' \
+    "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/" \
+  | sed '/^$/d'
+}
+
+show_diffs_for_changed_files() {
+  local -a files=()
+  mapfile -t files < <(collect_changed_files)
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    log "Diffs: (no files would be updated)"
+    return 0
+  fi
 
   log "Diffs for changed files (repo -> printer):"
 
-  # Build file list safely
-  mapfile -t diff_files < <(
-    printf '%s\n' "$preflight_out" |
-      awk '
-        $1 ~ /^>f/ {
-          flags=$1
-          if (index(flags,"s") || index(flags,"c")) {
-            sub(/^[^ ]+[ ]+/, "", $0)
-            print $0
-          }
-        }
-      '
-  )
-
-  if [[ ${#diff_files[@]} -eq 0 ]]; then
-    log "  (No content-changing regular files detected to diff.)"
-    return 0
-  fi
-
   local shown=0
-  for p in "${diff_files[@]}"; do
-    (( shown >= DIFF_MAX_FILES )) && {
-      warn "Diff limit reached ($DIFF_MAX_FILES files)."
-      break
-    }
+  for p in "${files[@]}"; do
+    (( shown >= DIFF_MAX_FILES )) && { warn "Diff limit reached ($DIFF_MAX_FILES files)."; break; }
 
     local src="$REPO_CONFIG_DIR/$p"
     local dst="$KLIPPERCONFIG/$p"
 
-    [[ -f "$src" ]] || { warn "Skip diff (missing in repo): $src"; continue; }
+    [[ -f "$src" ]] || continue
 
     if [[ ! -f "$dst" ]]; then
       log "---- $p (new file on deploy)"
@@ -336,92 +259,58 @@ show_preflight_diffs() {
     fi
 
     log "---- $p"
-
-    # diff: 0 same, 1 different, 2 error
     set +e
     diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src"
-    rc=$?
     set -e
-
-    [[ $rc -eq 2 ]] && warn "diff error for $p (rc=2)"
     ((shown++))
   done
 }
 
-# --- Config deployment (tarball snapshots) -----------------------------------
-snapshot_config_dir() {
-  mkdir -p "$CONFIG_SNAPSHOT_DIR"
-  log "Creating config snapshot: $CONFIG_SNAPSHOT_FILE"
-  tar -C "$KLIPPERCONFIG" -czf "$CONFIG_SNAPSHOT_FILE" . || fail "Snapshot tar failed."
-}
-
+# ------------------------- Config deploy -------------------------
 deploy_config() {
-  [[ -d "$REPO_CONFIG_DIR" ]] || fail "Repo config directory not found: $REPO_CONFIG_DIR"
+  [[ -d "$REPO_CONFIG_DIR" ]] || fail "Repo config directory missing: $REPO_CONFIG_DIR"
+  mkdir -p "$KLIPPERCONFIG"
 
-  local -a args=("${rsync_base[@]}" "--prune-empty-dirs")
+  local -a args=()
+  args+=("-a" "--prune-empty-dirs" "--human-readable" "--info=stats1,NAME")
+  [[ $VERBOSE -eq 1 ]] && args+=("-v")
+  [[ $DRY_RUN -eq 1 ]] && args+=("-n")
   [[ $DELETE_FLAG -eq 1 ]] && args+=("--delete")
-  args+=("${exclude_args[@]}")
+  for ex in "${EXCLUDES[@]}"; do
+    args+=("--exclude=$ex")
+  done
 
   log "Deploying repo config -> $KLIPPERCONFIG"
   log "  delete: $([[ $DELETE_FLAG -eq 1 ]] && echo yes || echo no)"
   log "  snapshot: $([[ $DRY_RUN -eq 0 ]] && echo "$CONFIG_SNAPSHOT_FILE" || echo "(skipped: dry-run)")"
 
-  # Safety: avoid destructive delete when source is empty unless explicitly confirmed
-  if [[ $DELETE_FLAG -eq 1 && $DRY_RUN -eq 0 && $CONFIRM -eq 0 ]]; then
-    if ! find "$REPO_CONFIG_DIR" -mindepth 1 -not -path '*/.git/*' -print -quit | grep -q .; then
-      fail "Repo config directory appears empty; refusing to run rsync with --delete without --confirm. Re-run with --confirm or use --no-delete."
-    fi
-  fi
-
-  # Preflight: rsync dry-run itemized
-  local -a preflight_args=("${args[@]}")
-  preflight_args+=("-n" "--itemize-changes")
-  local preflight_out
-  preflight_out=$(rsync "${preflight_args[@]}" "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/" || true)
-
-  local deletes updates total
-  deletes=$(echo "$preflight_out" | grep -c '^\*deleting ' || true)
-  updates=$(echo "$preflight_out" | grep -E '^[<>cdhs\.].' | grep -v '^\*deleting ' | wc -l | tr -d ' ')
-  total=$((deletes + updates))
+  # Always show the rsync itemized preview (helpful regardless)
+  local preview
+  preview=$(rsync "${args[@]}" --itemize-changes "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/" || true)
 
   if [[ $DRY_RUN -eq 1 ]]; then
-    log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
-    [[ -n "$preflight_out" ]] && echo "$preflight_out"
-    show_preflight_diffs "$preflight_out"
-    return 0
-  fi
-
-  if (( total > 0 )); then
-    log "Preflight summary: updates=$updates deletions=$deletes (total=$total)"
-    if [[ $CONFIRM -eq 0 ]]; then
-      confirm_with_message "About to apply the above changes to:\n  $KLIPPERCONFIG\nA tar snapshot will be created first at:\n  $CONFIG_SNAPSHOT_FILE\nUse --dry-run to preview or --no-delete to avoid deletions."
+    echo "$preview"
+    if [[ $SHOW_DIFF -eq 1 ]]; then
+      show_diffs_for_changed_files
     fi
-  else
-    log "Preflight summary: no changes needed."
     return 0
   fi
 
-  # Snapshot then deploy
+  confirm_or_exit
   snapshot_config_dir
   rsync "${args[@]}" "$REPO_CONFIG_DIR/" "$KLIPPERCONFIG/"
   log "Config deployment complete. Snapshot saved at: $CONFIG_SNAPSHOT_FILE"
 }
 
-# --- Main --------------------------------------------------------------------
+# ------------------------- Main -------------------------
 log "Repo:           $PROJECT_ROOT"
-log "NotMine dir:    $REPO_NOTMINE_DIR"
 log "Repo config:    $REPO_CONFIG_DIR"
-log "Printer home:   $PRINTER_HOME"
-log "Extras:         $EXTRAS_DIR"
 log "Printer config: $KLIPPERCONFIG"
 log "Snapshots root: $SNAPSHOT_ROOT"
 log "Dry-run:        $([[ $DRY_RUN -eq 1 ]] && echo yes || echo no)"
-log "Verbose:        $([[ $VERBOSE -eq 1 ]] && echo yes || echo no)"
 log "Targets:        NotMine=$([[ $DO_NOTMINE -eq 1 ]] && echo yes || echo no), Config=$([[ $DO_CONFIG -eq 1 ]] && echo yes || echo no)"
-log "Git preflight:  $([[ $GIT_PULL -eq 1 ]] && echo enabled || echo disabled)"
 
 git_preflight
-confirm_or_exit
 
 if [[ $DO_NOTMINE -eq 1 ]]; then
   log "--- Deploy NotMine ---"
@@ -433,10 +322,9 @@ if [[ $DO_CONFIG -eq 1 ]]; then
   deploy_config
 fi
 
-# Restore stash if we made one
 if [[ $STASH_MADE -eq 1 && $DRY_RUN -eq 0 ]]; then
   log "Git: restoring stashed changes"
-  git -C "$PROJECT_ROOT" stash pop -q || warn "Git: failed to pop stash; your changes remain stashed."
+  git -C "$PROJECT_ROOT" stash pop -q || warn "Git: stash pop failed; changes remain stashed."
 fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
