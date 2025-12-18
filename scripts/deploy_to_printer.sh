@@ -301,26 +301,30 @@ show_preflight_diffs() {
 
   log "Diffs for changed files (repo -> printer):"
 
+  # Robustly extract paths from rsync itemize output:
+  # - first field is the 11-char itemize token (e.g. >f.st......)
+  # - rest of line is the path
+  # We only keep regular files being sent (>f) where flags contain s (size) or c (checksum).
   local -a paths=()
-  while IFS= read -r line; do
-    # Only diff regular files that rsync will send (">f")
-    [[ "$line" =~ ^\>f ]] || continue
-
-    # Only diff when CONTENT likely changed: 'c' (checksum) or 's' (size).
-    # Look ONLY at the 11-char itemize field (before the space), not the filename.
-    local flags="${line:0:11}"
-    [[ "$flags" == *c* || "$flags" == *s* ]] || continue
-
-    # Path begins at column 13 (0-based index 12): 11 flags + space
-    local path="${line:12}"
-    # trim leading whitespace
-    path="${path#"${path%%[![:space:]]*}"}"
-    # trim trailing whitespace
-    path="${path%"${path##*[![:space:]]}"}"
-    # strip CR if present (windowsy / weird terminal cases)
-    path="${path//$'\r'/}"
-    [[ -n "$path" ]] && paths+=("$path")
-  done <<< "$preflight_out"
+  while IFS= read -r p; do
+    # strip CR, trim whitespace
+    p="${p//$'\r'/}"
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+    [[ -n "$p" ]] && paths+=("$p")
+  done < <(
+    printf '%s\n' "$preflight_out" |
+      awk '
+        $1 ~ /^>f/ {
+          flags=$1
+          if (index(flags,"s") || index(flags,"c")) {
+            # print everything after the first field + space
+            sub(/^[^ ]+[ ]+/, "", $0)
+            print $0
+          }
+        }
+      '
+  )
 
   if [[ ${#paths[@]} -eq 0 ]]; then
     log "  (No content-changing regular files detected to diff.)"
@@ -334,8 +338,15 @@ show_preflight_diffs() {
     local src="$REPO_CONFIG_DIR/$p"
     local dst="$KLIPPERCONFIG/$p"
 
-    [[ -f "$src" ]] || continue
-    [[ -f "$dst" ]] || { log "---- $p (new file)"; ((shown++)); continue; }
+    if [[ ! -f "$src" ]]; then
+      warn "Skip diff (missing in repo): $src"
+      continue
+    fi
+    if [[ ! -f "$dst" ]]; then
+      log "---- $p (new file on deploy)"
+      ((shown++))
+      continue
+    fi
 
     # Skip binaries if we have `file`
     if command -v file >/dev/null 2>&1; then
@@ -347,13 +358,12 @@ show_preflight_diffs() {
     fi
 
     log "---- $p"
-    # diff order is: printer then repo, so:
-    #  - lines are "removed from printer by deploy"
-    #  + lines are "added from repo by deploy"
+    # diff order is: printer then repo
     diff -U "$DIFF_CONTEXT" --label "printer/$p" --label "repo/$p" "$dst" "$src" || true
     ((shown++))
   done
 }
+
 
 # --- Config deployment (tarball snapshots) -----------------------------------
 snapshot_config_dir() {
