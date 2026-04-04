@@ -5,6 +5,7 @@
 # Sourced from https://github.com/ben5459/Klipper_ToolChanger/blob/master/probe_multi_axis.py
 
 import logging
+import os
 
 direction_types = {
     'x+': [0, +1], 'x-': [0, -1],
@@ -24,6 +25,18 @@ class ToolsCalibrate:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
+
+        # Setup file logging to user's home directory
+        log_file = os.path.expanduser("~/calibration.log")
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger("ToolsCalibrate")
 
         self.gcode_move = self.printer.load_object(config, "gcode_move")
         self.gcode = self.printer.lookup_object('gcode')
@@ -88,14 +101,19 @@ class ToolsCalibrate:
             direction, gcmd, samples=samples,
             max_distance=self.spread * 1.8
         )
-        return res[offset[0]]
+        result_value = res[offset[0]]
+        self.logger.debug("probe_xy - Direction: %s, Result: %.6f", direction, result_value)
+        return result_value
 
     def calibrate_xy(self, toolhead, top_pos, gcmd, samples=None):
         left_x = self.probe_xy(toolhead, top_pos, 'x+', gcmd, samples=samples)
         right_x = self.probe_xy(toolhead, top_pos, 'x-', gcmd, samples=samples)
         near_y = self.probe_xy(toolhead, top_pos, 'y+', gcmd, samples=samples)
         far_y = self.probe_xy(toolhead, top_pos, 'y-', gcmd, samples=samples)
-        return [(left_x + right_x) / 2., (near_y + far_y) / 2.]
+        center_x = (left_x + right_x) / 2.
+        center_y = (near_y + far_y) / 2.
+        self.logger.debug("calibrate_xy - Center X: %.6f, Center Y: %.6f", center_x, center_y)
+        return [center_x, center_y]
 
     def locate_sensor(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead')
@@ -117,6 +135,9 @@ class ToolsCalibrate:
         toolhead.manual_move([None, None, position[2]], self.lift_speed)
         toolhead.manual_move([position[0], position[1], None], self.travel_speed)
         toolhead.set_position(position)
+        
+        # Log the sensor location
+        self.logger.info("Sensor location found at X: %.6f, Y: %.6f, Z: %.6f", center_x, center_y, center_z)
         return [center_x, center_y, center_z]
 
     def cmd_TOOL_LOCATE_SENSOR(self, gcmd):
@@ -126,6 +147,8 @@ class ToolsCalibrate:
             "Sensor location at %.6f,%.6f,%.6f"
             % (self.last_result[0], self.last_result[1], self.last_result[2])
         )
+        self.logger.info("TOOL_LOCATE_SENSOR completed - Sensor location at X: %.6f, Y: %.6f, Z: %.6f", 
+                        self.last_result[0], self.last_result[1], self.last_result[2])
 
     def cmd_TOOL_CALIBRATE_TOOL_OFFSET(self, gcmd):
         if not self.sensor_location:
@@ -136,6 +159,8 @@ class ToolsCalibrate:
             "Tool offset is %.6f,%.6f,%.6f"
             % (self.last_result[0], self.last_result[1], self.last_result[2])
         )
+        self.logger.info("TOOL_CALIBRATE_TOOL_OFFSET completed - Tool offset is X: %.6f, Y: %.6f, Z: %.6f", 
+                        self.last_result[0], self.last_result[1], self.last_result[2])
 
     def cmd_TOOL_CALIBRATE_SAVE_TOOL_OFFSET(self, gcmd):
         if self.last_result is None:
@@ -167,6 +192,8 @@ class ToolsCalibrate:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer." % (self.probe_name, z_offset)
         )
+        
+        self.logger.info("TOOL_CALIBRATE_PROBE_OFFSET completed - Probe offset is %.6f", z_offset)
 
         config_name = gcmd.get("PROBE", default=self.probe_name)
         if config_name:
@@ -183,6 +210,7 @@ class ToolsCalibrate:
         trig = any(states)
         self.calibration_probe_triggered = trig
         gcmd.respond_info("Calibration Probe: %s" % (["open", "TRIGGERED"][trig]))
+        self.logger.info("TOOL_CALIBRATE_QUERY_PROBE - Calibration Probe state: %s", ["open", "TRIGGERED"][trig])
 
     def get_status(self, eventtime):
         lr = self.last_result if self.last_result is not None else [0.0, 0.0, 0.0]
@@ -459,4 +487,8 @@ class ProbeEndstopWrapper:
 
 
 def load_config(config):
+    # Log module startup
+    logger = logging.getLogger("ToolsCalibrate")
+    logger.info("ToolsCalibrate module loaded and initialized")
     return ToolsCalibrate(config)
+
