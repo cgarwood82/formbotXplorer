@@ -323,26 +323,21 @@ extract_serial_includes_from_file() {
   [[ -f "$root" ]] || return 0
   local base
   base=$(dirname -- "$root")
-  # Grab only include lines that reference 02__Boards_Serials
   while IFS= read -r inc; do
-    # Normalize quotes
-    inc=${inc%]}            # drop trailing ] if any leftover
-    inc=${inc#*[include }   # drop prefix up to include
-    inc=${inc#*[include	}  # tabs variant (harmless if not present)
     inc=${inc//\"/}
     inc=${inc//\'/}
-    # Only consider entries that contain the serials folder
+    inc=${inc#"${inc%%[![:space:]]*}"}
+    inc=${inc%"${inc##*[![:space:]]}"}
+    [[ -n "$inc" ]] || continue
     [[ "$inc" == *"02__Boards_Serials/"* ]] || continue
-    # If absolute path
     if [[ "$inc" = /* ]]; then
       [[ -f "$inc" ]] && echo "$inc"
     else
-      # Remove leading ./ if present
       inc=${inc#./}
       [[ -f "$base/$inc" ]] && echo "$base/$inc"
       [[ -f "$CONFIG_DIR/$inc" ]] && echo "$CONFIG_DIR/$inc"
     fi
-  done < <(sed -n -e 's/#.*$//' -e '/^[[:space:]]*\[include[[:space:]]\{1,\}[^]]*02__Boards_Serials\//p' "$root")
+  done < <(sed -nE -e 's/#.*$//' -e 's/^[[:space:]]*\[include[[:space:]]+([^]]+)\].*$/\1/p' "$root")
 }
 
 # Collect included serial files
@@ -365,8 +360,8 @@ for top in "$CONFIG_DIR"/*.cfg; do
 done
 shopt -u nullglob
 
-# Deduplicate
-mapfile -t INCLUDED_SERIAL_FILES < <(printf '%s\n' "${INCLUDED_SERIAL_FILES[@]}" | awk 'NF&&!seen[$0]++')
+# Deduplicate (normalize /./ segments so identical files don't slip through)
+mapfile -t INCLUDED_SERIAL_FILES < <(printf '%s\n' "${INCLUDED_SERIAL_FILES[@]}" | sed 's|/\./|/|g' | awk 'NF&&!seen[$0]++')
 
 if [[ ${#INCLUDED_SERIAL_FILES[@]} -eq 0 ]]; then
   warn "No serial cfg files from ${SERIALS_DIR} are included by ${PRINTER_CFG}."
@@ -416,6 +411,7 @@ profile_config_path() {
 }
 
 PARSE_DEBUG_LINES=()
+ACTIVE_MCU_LIST=()
 for f in "${INCLUDED_SERIAL_FILES[@]}"; do
   line=$(parse_serial_cfg_file "$f" || true)
   if [[ -z "$line" ]]; then
@@ -423,10 +419,15 @@ for f in "${INCLUDED_SERIAL_FILES[@]}"; do
     continue
   fi
   IFS='|' read -r name type id file <<< "$line"
+  if [[ -n "${MCU_TYPE[$name]:-}" ]]; then
+    PARSE_DEBUG_LINES+=("$f => duplicate name '$name'; ignoring")
+    continue
+  fi
   MCU_TYPE["$name"]="$type"
   MCU_ID["$name"]="$id"
   MCU_CFGFILE["$name"]="$file"
   MCU_SOURCE["$name"]="$file"
+  ACTIVE_MCU_LIST+=("$name")
   # Capture optional board hint
   bhint=$(extract_board_hint "$file" || true)
   if [[ -n "$bhint" ]]; then
@@ -435,13 +436,6 @@ for f in "${INCLUDED_SERIAL_FILES[@]}"; do
   else
     PARSE_DEBUG_LINES+=("$f => name=$name type=$type id=$id")
   fi
-
-done
-
-# Active MCUs are those included serial cfgs we parsed
-ACTIVE_MCU_LIST=()
-for n in "${!MCU_TYPE[@]}"; do
-  ACTIVE_MCU_LIST+=("$n")
 done
 
 # If specific targets are provided, use those; else default to active list
@@ -546,6 +540,17 @@ if [[ ${#PLAN_ROWS[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# Show what we are about to do before touching anything
+echo "Flashing plan:"
+print_plan
+echo
+
+# Klipper source must already be checked out for `make` to work
+if [[ ! -f "$KLIPPER_DIR/Makefile" ]]; then
+  err "Klipper source not found at $KLIPPER_DIR (no Makefile). Clone Klipper there and retry."
+  exit 12
+fi
+
 # Determine if any CAN devices will be flashed and validate Katapult/python3
 HAS_CAN_FLASH=0
 for row in "${PLAN_ROWS[@]}"; do
@@ -587,12 +592,21 @@ start_klipper() {
   sudo -n systemctl start klipper 2>/dev/null || sudo -n service klipper start 2>/dev/null || true
 }
 
+KLIPPER_STOPPED=0
+ensure_klipper_started() {
+  if [[ $KLIPPER_STOPPED -eq 1 ]]; then
+    log "Starting Klipper service..."
+    start_klipper
+    KLIPPER_STOPPED=0
+  fi
+}
+trap ensure_klipper_started EXIT INT TERM
+
 if [[ $KEEP_KLIPPER_RUNNING -eq 0 ]]; then
   log "Stopping Klipper service..."
   stop_klipper
+  KLIPPER_STOPPED=1
 fi
-
-mkdir -p "$KLIPPER_DIR"
 
 overall_ok=0
 for row in "${PLAN_ROWS[@]}"; do
@@ -652,13 +666,6 @@ for row in "${PLAN_ROWS[@]}"; do
   sleep 3
 
 done
-
-if [[ $KEEP_KLIPPER_RUNNING -eq 0 ]]; then
-  log "Starting Klipper service..."
-  start_klipper
-fi
-
-print_plan
 
 if [[ $overall_ok -eq 1 ]]; then
   log "\nFirmware flashing complete."
