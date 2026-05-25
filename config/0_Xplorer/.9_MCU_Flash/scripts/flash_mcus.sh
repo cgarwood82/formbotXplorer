@@ -468,6 +468,50 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
   TARGETS=("${ACTIVE_MCU_LIST[@]}")
 fi
 
+# Query moonraker for each active MCU's currently-running firmware version,
+# and resolve the source HEAD's version. We'll use this in the plan stage to
+# skip flashing MCUs that are already on the version we'd build.
+# Trusted only when moonraker reports printer state == "ready" -- otherwise
+# the reported mcu_version may be stale (e.g. last known before a disconnect).
+declare -A RUNNING_VERSION
+SOURCE_VERSION=""
+PRINTER_STATE=""
+if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  # Klipper uses lightweight tags, so --tags is required to get the full
+  # "v0.13.0-662-gbd99b19b" form (without --tags we just get the short hash).
+  SOURCE_VERSION=$(cd "$KLIPPER_DIR" 2>/dev/null && git describe --tags --always --dirty 2>/dev/null || true)
+  if [[ -n "$SOURCE_VERSION" ]]; then
+    pinfo=$(curl -s --max-time 3 http://localhost:7125/printer/info 2>/dev/null || true)
+    if [[ -n "$pinfo" ]]; then
+      PRINTER_STATE=$(python3 -c "import sys,json
+try: print(json.loads(sys.stdin.read()).get('result',{}).get('state',''))
+except Exception: pass" <<<"$pinfo" 2>/dev/null || true)
+    fi
+    if [[ "$PRINTER_STATE" == "ready" && ${#ACTIVE_MCU_LIST[@]} -gt 0 ]]; then
+      mr_query=""
+      for n in "${ACTIVE_MCU_LIST[@]}"; do
+        if [[ "$n" == "mcu" ]]; then
+          mr_query+="${mr_query:+&}mcu"
+        else
+          mr_query+="${mr_query:+&}mcu%20${n// /%20}"
+        fi
+      done
+      mr_resp=$(curl -s --max-time 5 "http://localhost:7125/printer/objects/query?${mr_query}" 2>/dev/null || true)
+      if [[ -n "$mr_resp" ]]; then
+        while IFS=$'\t' read -r mname mver; do
+          [[ -n "$mname" ]] && RUNNING_VERSION["$mname"]="$mver"
+        done < <(python3 -c "import sys,json
+try:
+    d = json.loads(sys.stdin.read())
+    for k,v in d.get('result',{}).get('status',{}).items():
+        name = k[4:] if k.startswith('mcu ') else k
+        print(f'{name}\t{v.get(\"mcu_version\",\"\")}')
+except Exception: pass" <<<"$mr_resp" 2>/dev/null)
+      fi
+    fi
+  fi
+fi
+
 # Debug info on discovery
 if [[ $DEBUG -eq 1 ]]; then
   echo "[DEBUG] Resolved config files:"
@@ -518,6 +562,12 @@ for name in "${TARGETS[@]}"; do
       continue
     fi
   fi
+  # Skip if the MCU already reports the firmware version we'd build
+  running="${RUNNING_VERSION[$name]:-}"
+  if [[ -n "$running" && -n "$SOURCE_VERSION" && "$running" == "$SOURCE_VERSION" ]]; then
+    PLAN_ROWS+=("$name|skip|already on $SOURCE_VERSION (target=$SOURCE_VERSION)")
+    continue
+  fi
   PLAN_ROWS+=("$name|flash|$cfg_path|${MCU_TYPE[$name]}|${MCU_ID[$name]}|$detail")
 done
 
@@ -538,6 +588,12 @@ print_plan() {
         echo "      device: $id"
         if [[ -n "${MCU_FLASH_DEVICE[$name]:-}" ]]; then
           echo "      flash_device: ${MCU_FLASH_DEVICE[$name]} (override)"
+        fi
+        if [[ -n "${RUNNING_VERSION[$name]:-}" ]]; then
+          echo "      current_version: ${RUNNING_VERSION[$name]}"
+        fi
+        if [[ -n "$SOURCE_VERSION" ]]; then
+          echo "      target_version: $SOURCE_VERSION"
         fi
         echo "      flash: Klipper make flash"
       elif [[ "$type" == "canbus" ]]; then
