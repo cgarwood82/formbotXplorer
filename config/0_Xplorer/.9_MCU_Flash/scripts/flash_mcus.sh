@@ -369,7 +369,7 @@ if [[ ${#INCLUDED_SERIAL_FILES[@]} -eq 0 ]]; then
 fi
 
 # Build map of MCUs strictly from included serial cfg files
-declare -A MCU_TYPE MCU_ID MCU_CFGFILE MCU_SOURCE MCU_BOARD_HINT
+declare -A MCU_TYPE MCU_ID MCU_CFGFILE MCU_SOURCE MCU_BOARD_HINT MCU_FLASH_DEVICE
 
 # Extract optional board hint from a serial cfg file.
 # Supports either a comment:  # board: Fysetc_H36
@@ -389,6 +389,24 @@ extract_board_hint() {
   # Then comment form
   hint=$(sed -n \
     -e '/^[[:space:]]*#[[:space:]]*board[[:space:]]*:/!d' \
+    -e 's/^[^:]*:[[:space:]]*//' \
+    -e 's/[[:space:]]*$//' \
+    -e 'p;q' "$f")
+  [[ -n "$hint" ]] && echo "$hint" || true
+}
+
+# Extract optional flash_device override from a serial cfg file. Used when the
+# runtime klipper connection (serial:) is not the right path for `make flash`
+# -- e.g. when the Pi talks to the MCU over a UART bridge but flashing has to
+# go through the MCU's native USB port. Supports a comment form only, since
+# Klipper would reject an unknown key inside [mcu]:
+#   # flash_device: /dev/serial/by-id/usb-Klipper_stm32h723xx_...
+extract_flash_device() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  local hint
+  hint=$(sed -n \
+    -e '/^[[:space:]]*#[[:space:]]*flash_device[[:space:]]*:/!d' \
     -e 's/^[^:]*:[[:space:]]*//' \
     -e 's/[[:space:]]*$//' \
     -e 'p;q' "$f")
@@ -433,10 +451,16 @@ for f in "${INCLUDED_SERIAL_FILES[@]}"; do
   bhint=$(extract_board_hint "$file" || true)
   if [[ -n "$bhint" ]]; then
     MCU_BOARD_HINT["$name"]="$bhint"
-    PARSE_DEBUG_LINES+=("$f => name=$name type=$type id=$id board=$bhint")
-  else
-    PARSE_DEBUG_LINES+=("$f => name=$name type=$type id=$id")
   fi
+  # Capture optional flash_device override
+  fhint=$(extract_flash_device "$file" || true)
+  if [[ -n "$fhint" ]]; then
+    MCU_FLASH_DEVICE["$name"]="$fhint"
+  fi
+  debug_line="$f => name=$name type=$type id=$id"
+  [[ -n "$bhint" ]] && debug_line+=" board=$bhint"
+  [[ -n "$fhint" ]] && debug_line+=" flash_device=$fhint"
+  PARSE_DEBUG_LINES+=("$debug_line")
 done
 
 # If specific targets are provided, use those; else default to active list
@@ -512,6 +536,9 @@ print_plan() {
       echo "      bus: $type"
       if [[ "$type" == "serial" ]]; then
         echo "      device: $id"
+        if [[ -n "${MCU_FLASH_DEVICE[$name]:-}" ]]; then
+          echo "      flash_device: ${MCU_FLASH_DEVICE[$name]} (override)"
+        fi
         echo "      flash: Klipper make flash"
       elif [[ "$type" == "canbus" ]]; then
         echo "      canbus_uuid: $id"
@@ -629,12 +656,19 @@ for row in "${PLAN_ROWS[@]}"; do
   /usr/bin/make clean
   /usr/bin/make -j$(nproc)
 
-  log "Flashing $name ..."
+  # Allow a per-MCU flash_device override (e.g. mainboard talks UART at
+  # runtime but flashing has to go through its native USB port).
+  flash_target="${MCU_FLASH_DEVICE[$name]:-$id}"
+  if [[ "$flash_target" != "$id" ]]; then
+    log "Flashing $name (FLASH_DEVICE override: $flash_target)..."
+  else
+    log "Flashing $name ..."
+  fi
   if [[ "$type" == "serial" ]]; then
     # Soft-handle known dfu-util leave timing error after successful download
     set +e
     flash_log=$(mktemp)
-    sudo -n /usr/bin/make flash FLASH_DEVICE="$id" |& tee "$flash_log"
+    sudo -n /usr/bin/make flash FLASH_DEVICE="$flash_target" |& tee "$flash_log"
     rc=${PIPESTATUS[0]}
     set -e
     if (( rc != 0 )); then
