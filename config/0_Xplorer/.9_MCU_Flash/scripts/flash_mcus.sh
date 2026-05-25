@@ -250,12 +250,13 @@ resolve_board_profile() {
   echo "|unknown|No matching board profile for MCU '$name' (id: $id) ${note}"
 }
 
-# Verify passwordless sudo (no prompt) for 'make'.
+# Verify passwordless sudo for the commands this script actually invokes.
+# Group-based NOPASSWD entries typically cover make + systemctl/service only,
+# so we must test those specifically rather than the unrelated 'sudo -n true'.
 check_passwordless_sudo() {
-  if sudo -n true 2>/dev/null && (cd "$KLIPPER_DIR" && sudo -n /usr/bin/make --version >/dev/null 2>&1); then
-    return 0
-  fi
-  return 1
+  sudo -n /usr/bin/make --version >/dev/null 2>&1 || return 1
+  sudo -n systemctl --version >/dev/null 2>&1 || sudo -n service --version >/dev/null 2>&1 || return 1
+  return 0
 }
 
 # ------------- Discovery -------------
@@ -575,7 +576,7 @@ fi
 
 # Require passwordless sudo
 if ! check_passwordless_sudo; then
-  err "Passwordless sudo for 'make' is required. Configure group-based sudoers, e.g.:
+  err "Passwordless sudo for 'make' and 'systemctl' (or 'service') is required. Configure group-based sudoers, e.g.:
   %sudo ALL=(ALL) NOPASSWD: /usr/bin/make, /bin/systemctl, /usr/sbin/service
 Then re-run this script. Aborting."
   exit 10
