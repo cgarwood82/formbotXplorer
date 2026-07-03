@@ -182,7 +182,7 @@
             "remember_spool": false,
             "spool_id": null,
             "color": "#20D500",
-            "weight": 999.9755396341315,
+            "weight": 977.3228398888443,
             "extruder_temp": 0,
             "bed_temp": 0,
             "runout_lane": null,
@@ -213,7 +213,7 @@
             "remember_spool": false,
             "spool_id": null,
             "color": "#606060",
-            "weight": 556.0992674500484,
+            "weight": 455.1660779031435,
             "extruder_temp": 0,
             "bed_temp": 0,
             "runout_lane": null,
@@ -225,7 +225,7 @@
         }
     },
     "system": {
-        "current_load": "extruder3",
+        "current_load": "extruder2",
         "num_units": 2,
         "num_lanes": 7,
         "num_extruders": 4,
