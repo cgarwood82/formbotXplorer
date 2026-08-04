@@ -1,0 +1,25 @@
+# Klipper/Moonraker write dated backups next to the live config.
+# None of these belong in version control -- git IS the backup.
+
+# Mainsail/Moonraker config backups: printer-20260404_152914.cfg
+printer-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*.cfg
+
+# Hand-made and tool-made backups
+*.bak
+*.bak.*
+*.bak-*
+*.bkp
+*.bkp.*
+*.orig
+*.save
+*~
+*.backup
+*backup*/
+
+# Date-stamped copies: crowsnest.conf.2026-04-28-0154, moonraker.conf.2026-04-28-0154.bkp
+*.conf.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*
+*.cfg.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*
+
+# Python artifacts from config-dir modules
+__pycache__/
+*.py[cod]
