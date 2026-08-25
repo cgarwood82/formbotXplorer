@@ -23,3 +23,8 @@ printer-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*.cfg
 # Python artifacts from config-dir modules
 __pycache__/
 *.py[cod]
+
+# AFC runtime state: rewritten continuously as spools load and filament is consumed.
+# A committed copy is stale the moment it lands and must never be deployed back --
+# restoring it would misreport which spools are actually loaded.
+config/AFC/AFC.var.unit
