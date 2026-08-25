@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+#
+# klipper-sync -- move config between this git repo and the live Klipper config.
+#
+# Runs ON THE PRINTER. Two directions, deliberately asymmetric:
+#
+#   backup   live -> repo    the printer is the source of truth; capture it
+#   deploy   repo -> live    only for changes git already knows are newer
+#
+# The rule that makes deploy safe: a file is only written if the version
+# currently live is one git has already recorded for that path. If the live
+# content is something git has never seen, that is unbacked-up work and deploy
+# refuses rather than guessing which side is newer. No timestamps, no state
+# file -- just "does git recognise what is on the printer right now".
+#
+# Never restarts Klipper. Config changes are inert until you restart yourself.
+
+set -euo pipefail
+
+REPO="${KLIPPER_SYNC_REPO:-$HOME/src/formbotXplorer}"
+LIVE="${KLIPPER_SYNC_LIVE:-$HOME/printer_data/config}"
+SNAPSHOT_DIR="${KLIPPER_SYNC_SNAPSHOTS:-$HOME/printer_data/config_backups}"
+MOONRAKER="${KLIPPER_SYNC_MOONRAKER:-http://localhost:7125}"
+
+# Klipper appends its own calibration below this marker in printer.cfg. Deploy
+# replaces only the part above it and splices the live block back verbatim, so a
+# deploy can never cost you a shaper/PID/mesh calibration run.
+SPLIT_AT_SAVE_CONFIG=("printer.cfg")
+
+# Written by Klipper/plugins at runtime. Captured by backup so the repo reflects
+# the machine, never written back -- restoring a stale copy would misreport
+# live state. (AFC.var.unit churns so fast it is .gitignore'd outright instead.)
+BACKUP_ONLY=("variables.cfg")
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+[[ -t 1 ]] || { RED=; GRN=; YEL=; DIM=; OFF=; }
+
+die()  { printf '%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
+warn() { printf '%swarning:%s %s\n' "$YEL" "$OFF" "$*" >&2; }
+info() { printf '%s\n' "$*"; }
+
+in_list() { local n="$1"; shift; local e; for e in "$@"; do [[ "$e" == "$n" ]] && return 0; done; return 1; }
+
+# ---------------------------------------------------------------- enumeration
+
+# Relative paths of everything git would care about on one side. Symlinks are
+# listed as files: they ARE the content, and several configs are symlinks into
+# other checkouts (mainsail, timelapse, the KlipperScreen AFC menu).
+enumerate() {
+    local root="$1"
+    [[ -d "$root" ]] || return 0
+    ( cd "$root" && find . \( -type f -o -type l \) -printf '%P\n' ) | while IFS= read -r rel; do
+        [[ "$rel" == .git/* ]] && continue
+        git -C "$REPO" check-ignore -q "config/$rel" 2>/dev/null && continue
+        printf '%s\n' "$rel"
+    done | LC_ALL=C sort
+}
+
+# A stable identity for a path: symlinks compare by target, files by content.
+state_of() {
+    local p="$1"
+    if [[ -L "$p" ]]; then printf 'link:%s\n' "$(readlink "$p")"
+    elif [[ -f "$p" ]]; then printf 'blob:%s\n' "$(git hash-object -- "$p")"
+    else printf 'absent\n'
+    fi
+}
+
+# Has git ever recorded this exact content for this path? This is what lets
+# deploy tell "git is ahead" from "the printer has work git never saw".
+known_to_git() {
+    local rel="$1" want; want="$(state_of "$LIVE/$rel")"
+    [[ "$want" == absent ]] && return 1
+    local c obj
+    while IFS= read -r c; do
+        obj="$(git -C "$REPO" rev-parse -q --verify "$c:config/$rel" 2>/dev/null)" || continue
+        if [[ "$want" == link:* ]]; then
+            [[ "$(git -C "$REPO" cat-file -p "$obj" 2>/dev/null)" == "${want#link:}" ]] && return 0
+        else
+            [[ "$obj" == "${want#blob:}" ]] && return 0
+        fi
+    done < <(git -C "$REPO" log --format=%H --all -- "config/$rel")
+    return 1
+}
+
+# Emit "<status> <rel>" for every path that differs. Status is one of:
+#   git-ahead    live matches an older committed version -> safe to deploy
+#   live-ahead   live content git has never seen         -> back up first
+#   only-live    path absent from the repo               -> back up first
+#   only-repo    path absent from the printer            -> deploy would add it
+#   type-clash   symlink on one side, regular file on the other
+classify() {
+    local rel ls rs
+    while IFS= read -r rel; do
+        ls="$(state_of "$LIVE/$rel")"; rs="$(state_of "$REPO/config/$rel")"
+        [[ "$ls" == "$rs" ]] && continue
+        if   [[ "$rs" == absent ]]; then printf 'only-live %s\n' "$rel"
+        elif [[ "$ls" == absent ]]; then printf 'only-repo %s\n' "$rel"
+        elif [[ "${ls%%:*}" != "${rs%%:*}" ]]; then printf 'type-clash %s\n' "$rel"
+        elif known_to_git "$rel"; then printf 'git-ahead %s\n' "$rel"
+        else printf 'live-ahead %s\n' "$rel"
+        fi
+    done < <( { enumerate "$LIVE"; enumerate "$REPO/config"; } | LC_ALL=C sort -u )
+}
+
+# ------------------------------------------------------------------- guards
+
+printer_is_busy() {
+    local s
+    s="$(curl -fsS --max-time 5 "$MOONRAKER/printer/objects/query?print_stats" 2>/dev/null \
+         | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p')" || return 1
+    [[ "$s" == printing || "$s" == paused ]]
+}
+
+snapshot_live() {
+    mkdir -p "$SNAPSHOT_DIR"
+    local out="$SNAPSHOT_DIR/config-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar czf "$out" -C "$(dirname "$LIVE")" "$(basename "$LIVE")"
+    info "  snapshot: $out"
+}
+
+# ------------------------------------------------------------------ commands
+
+cmd_status() {
+    info "repo: $REPO"
+    info "live: $LIVE"
+    info ""
+    local head branch behind ahead dirty
+    head="$(git -C "$REPO" rev-parse --short HEAD)"
+    branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD)"
+    dirty="$(git -C "$REPO" status --porcelain --untracked-files=no | wc -l)"
+    git -C "$REPO" fetch --quiet origin 2>/dev/null || warn "could not reach origin; counts may be stale"
+    behind="$(git -C "$REPO" rev-list --count "HEAD..@{upstream}" 2>/dev/null || echo '?')"
+    ahead="$(git -C "$REPO" rev-list --count "@{upstream}..HEAD" 2>/dev/null || echo '?')"
+    info "git:  $branch @ $head   ahead $ahead, behind $behind, $dirty uncommitted"
+    printer_is_busy && info "      ${YEL}printer is busy (printing or paused)${OFF}"
+    info ""
+
+    local out; out="$(classify)"
+    if [[ -z "$out" ]]; then
+        info "${GRN}in sync${OFF} -- live and repo agree on every tracked file"
+        return 0
+    fi
+    local st rel
+    while read -r st rel; do
+        case "$st" in
+          git-ahead)  printf '  %sdeploy%s     %s\n' "$GRN" "$OFF" "$rel" ;;
+          live-ahead) printf '  %sbackup%s     %s\n' "$YEL" "$OFF" "$rel" ;;
+          only-live)  printf '  %sbackup%s     %s %s(new on printer)%s\n' "$YEL" "$OFF" "$rel" "$DIM" "$OFF" ;;
+          only-repo)  printf '  %sdeploy%s     %s %s(new in git)%s\n' "$GRN" "$OFF" "$rel" "$DIM" "$OFF" ;;
+          type-clash) printf '  %sCONFLICT%s   %s %s(symlink vs file)%s\n' "$RED" "$OFF" "$rel" "$DIM" "$OFF" ;;
+        esac
+    done <<< "$out"
+    info ""
+    info "${DIM}deploy = git has the newer version   backup = the printer does${OFF}"
+}
+
+cmd_diff() {
+    if [[ $# -ge 1 ]]; then
+        diff -u "$REPO/config/$1" "$LIVE/$1" && info "no differences"
+        return 0
+    fi
+    local st rel
+    while read -r st rel; do
+        [[ "$st" == only-* ]] && { printf '%s=== %s (%s)%s\n' "$YEL" "$rel" "$st" "$OFF"; continue; }
+        printf '%s=== %s (%s)%s\n' "$YEL" "$rel" "$st" "$OFF"
+        diff -u "$REPO/config/$rel" "$LIVE/$rel" || true
+    done <<< "$(classify)"
+}
+
+cmd_backup() {
+    local msg="${1:-}"
+    local out; out="$(classify)"
+    local -a take=()
+    local st rel
+    while read -r st rel; do
+        [[ -z "${st:-}" ]] && continue
+        case "$st" in live-ahead|only-live|git-ahead|type-clash) take+=("$rel") ;; esac
+    done <<< "$out"
+    (( ${#take[@]} )) || { info "${GRN}nothing to back up${OFF}"; return 0; }
+
+    info "capturing ${#take[@]} file(s) from the printer:"
+    for rel in "${take[@]}"; do
+        info "  $rel"
+        mkdir -p "$REPO/config/$(dirname "$rel")"
+        cp -a --remove-destination "$LIVE/$rel" "$REPO/config/$rel"
+    done
+    git -C "$REPO" add -A -- config
+    if git -C "$REPO" diff --cached --quiet; then
+        info "${GRN}no net change after ignore rules${OFF}"; return 0
+    fi
+    git -C "$REPO" commit -q -m "${msg:-Sync live printer config}
+
+Captured from the live printer config by klipper-sync."
+    info "${GRN}committed${OFF} $(git -C "$REPO" log --oneline -1)"
+    info "${DIM}not pushed -- run: git -C $REPO push${OFF}"
+}
+
+# Replace a file but keep Klipper's own SAVE_CONFIG block from the live copy.
+write_split() {
+    local rel="$1" src="$2" dst="$3"
+    local marker='^#\*# <-+ SAVE_CONFIG -+>'
+    if ! grep -qE "$marker" "$dst" 2>/dev/null; then
+        cp -a --remove-destination "$src" "$dst"; return 0
+    fi
+    local tmp; tmp="$(mktemp)"
+    sed -E "/$marker/,\$d" "$src" > "$tmp"          # repo content, calibration stripped
+    sed -nE "/$marker/,\$p" "$dst" >> "$tmp"        # live calibration, verbatim
+    cat "$tmp" > "$dst"; rm -f "$tmp"
+    info "        ${DIM}(kept live SAVE_CONFIG block)${OFF}"
+}
+
+cmd_deploy() {
+    local dry=0; [[ "${1:-}" == "--dry-run" ]] && dry=1
+
+    printer_is_busy && die "a print is running or paused -- refusing to touch the config"
+    [[ -z "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]] \
+        || die "repo has uncommitted changes -- commit or stash them first"
+    git -C "$REPO" fetch --quiet origin 2>/dev/null || warn "could not reach origin"
+    local behind; behind="$(git -C "$REPO" rev-list --count "HEAD..@{upstream}" 2>/dev/null || echo 0)"
+    (( behind == 0 )) || die "repo is $behind commit(s) behind origin -- pull first"
+
+    local out; out="$(classify)"
+    local -a blockers=() writes=()
+    local st rel
+    while read -r st rel; do
+        [[ -z "${st:-}" ]] && continue
+        case "$st" in
+          live-ahead|only-live|type-clash) blockers+=("$st $rel") ;;
+          git-ahead|only-repo)             writes+=("$rel") ;;
+        esac
+    done <<< "$out"
+
+    if (( ${#blockers[@]} )); then
+        printf '%srefusing to deploy%s -- the printer has changes git does not:\n' "$RED" "$OFF" >&2
+        printf '  %s\n' "${blockers[@]}" >&2
+        printf '\nrun: %s backup   then deploy again\n' "${0##*/}" >&2
+        exit 1
+    fi
+    (( ${#writes[@]} )) || { info "${GRN}nothing to deploy${OFF}"; return 0; }
+
+    info "will write ${#writes[@]} file(s) to $LIVE:"
+    for rel in "${writes[@]}"; do
+        if in_list "$rel" "${BACKUP_ONLY[@]}"; then info "  ${DIM}skip   $rel (backup-only)${OFF}"; continue; fi
+        if in_list "$rel" "${SPLIT_AT_SAVE_CONFIG[@]}"; then info "  split  $rel"; else info "  write  $rel"; fi
+    done
+    (( dry )) && { info ""; info "${DIM}--dry-run: nothing written${OFF}"; return 0; }
+
+    info ""; snapshot_live
+    for rel in "${writes[@]}"; do
+        in_list "$rel" "${BACKUP_ONLY[@]}" && continue
+        mkdir -p "$LIVE/$(dirname "$rel")"
+        if in_list "$rel" "${SPLIT_AT_SAVE_CONFIG[@]}"; then
+            write_split "$rel" "$REPO/config/$rel" "$LIVE/$rel"
+        else
+            cp -a --remove-destination "$REPO/config/$rel" "$LIVE/$rel"
+        fi
+    done
+    info "${GRN}deployed${OFF}"
+    info "${YEL}Klipper has NOT been restarted -- changes are inert until you do.${OFF}"
+}
+
+usage() {
+    cat <<EOF
+${0##*/} -- sync Klipper config between this git repo and the live printer
+
+  status              what differs, and which side is newer
+  diff [file]         unified diff, all differing files or just one
+  backup [-m msg]     live -> repo, then commit (does not push)
+  deploy [--dry-run]  repo -> live, refuses if the printer has unbacked-up work
+
+deploy also refuses while a print is running, if the repo is dirty, or if it is
+behind origin. It snapshots $LIVE to a tarball before writing anything, keeps
+Klipper's SAVE_CONFIG block in printer.cfg, skips runtime-state files, and never
+restarts Klipper.
+EOF
+}
+
+main() {
+    [[ -d "$REPO/.git" ]] || die "no git repo at $REPO"
+    [[ -d "$LIVE" ]]      || die "no live config at $LIVE"
+    case "${1:-status}" in
+        status)          cmd_status ;;
+        diff)            shift; cmd_diff "$@" ;;
+        backup)          shift; [[ "${1:-}" == "-m" ]] && shift; cmd_backup "${1:-}" ;;
+        deploy)          shift; cmd_deploy "${1:-}" ;;
+        -h|--help|help)  usage ;;
+        *)               usage; exit 1 ;;
+    esac
+}
+
+main "$@"
