@@ -174,7 +174,11 @@ cmd_backup() {
     local st rel
     while read -r st rel; do
         [[ -z "${st:-}" ]] && continue
-        case "$st" in live-ahead|only-live|git-ahead|type-clash) take+=("$rel") ;; esac
+        # Deliberately NOT git-ahead: those are pending deploys, where the repo
+        # holds the newer version. Capturing them would copy the printer's older
+        # copy back over the repo and commit it, silently reverting work that was
+        # written locally and not yet deployed.
+        case "$st" in live-ahead|only-live|type-clash) take+=("$rel") ;; esac
     done <<< "$out"
     (( ${#take[@]} )) || { info "${GRN}nothing to back up${OFF}"; return 0; }
 
