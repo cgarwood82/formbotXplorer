@@ -8,6 +8,13 @@ Klipper builds its template environment as jinja2.Environment('{%','%}','{','}')
 The property that matters most here is the last test: the carriage
 choreography must be byte-identical no matter which TOOL= is requested, so a
 single-tool run never takes a clearance path the full run doesn't.
+
+On the printer, run it with klippy-env's interpreter -- system python has no
+jinja2:
+
+    ~/klippy-env/bin/python scripts/test_tool_z_calibrate.py
+    ~/klippy-env/bin/python scripts/test_tool_z_calibrate.py \
+        ~/printer_data/config/Macros/tool_z_calibrate.cfg
 """
 import configparser
 import os
