@@ -16,29 +16,18 @@ jinja2:
     ~/klippy-env/bin/python scripts/test_tool_z_calibrate.py \
         ~/printer_data/config/Macros/tool_z_calibrate.cfg
 """
-import configparser
 import os
 import re
 import sys
 
-import jinja2
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from klipper_macro_harness import Checker, Dotted, RaisedError, lines, render  # noqa: E402
 
 # Defaults to the copy in this repo; override with argv[1] to test a live file:
 #   scripts/test_tool_z_calibrate.py ~/printer_data/config/Macros/tool_z_calibrate.cfg
 CFG = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..", "config", "Macros", "tool_z_calibrate.cfg")
-
-
-class Dotted(dict):
-    """dict that also allows attribute access, like Klipper's printer object."""
-
-    def __getattr__(self, k):
-        try:
-            v = self[k]
-        except KeyError:
-            raise AttributeError(k)
-        return v
 
 
 def printer_obj(last_result=(0.25, 0.11, 0.04), state="standby"):
@@ -54,71 +43,44 @@ def printer_obj(last_result=(0.25, 0.11, 0.04), state="standby"):
     )
 
 
-class RaisedError(Exception):
-    pass
+def render_macro(macro, params, printer=None):
+    return render(CFG, macro, params, printer if printer is not None else printer_obj())
 
 
-def render(macro, params, printer=None):
-    cp = configparser.RawConfigParser(strict=False, inline_comment_prefixes=(';', '#'))
-    cp.read(CFG)
-    src = cp.get("gcode_macro " + macro, "gcode")
-    env = jinja2.Environment('{%', '%}', '{', '}')
-
-    def raise_error(msg):
-        raise RaisedError(str(msg))
-
-    ctx = {
-        "params": {k: str(v) for k, v in params.items()},
-        "printer": printer if printer is not None else printer_obj(),
-        "action_raise_error": raise_error,
-        "action_respond_info": lambda m: "",
-        "action_emergency_stop": lambda *a: "",
-    }
-    return env.from_string(src).render(**ctx)
-
-
-def lines(text):
-    return [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-
-FAILS = []
+_check = Checker()
 
 
 def check(name, cond, detail=""):
-    if cond:
-        print("  ok   %s" % name)
-    else:
-        print("  FAIL %s %s" % (name, detail))
-        FAILS.append(name)
+    _check(name, cond, detail)
 
 
 # ---------------------------------------------------------------- _TZC_SAVE
 print("_TZC_SAVE")
 
 for tool in (1, 2, 3):
-    out = render("_TZC_SAVE", {"TOOL": tool, "DRY_RUN": 0})
+    out = render_macro("_TZC_SAVE", {"TOOL": tool, "DRY_RUN": 0})
     saves = [l for l in lines(out) if l.startswith("SAVE_VARIABLE")]
     check("T%d writes exactly one variable" % tool, len(saves) == 1, saves)
     check("T%d writes z%doffset" % (tool, tool),
           saves and saves[0].startswith("SAVE_VARIABLE VARIABLE=z%doffset" % tool), saves)
 
 for tool in (1, 2, 3):
-    out = render("_TZC_SAVE", {"TOOL": tool, "DRY_RUN": 0})
+    out = render_macro("_TZC_SAVE", {"TOOL": tool, "DRY_RUN": 0})
     check("T%d never writes x/y" % tool,
           not re.search(r"SAVE_VARIABLE\s+VARIABLE=[xy]\d?offset", out))
 
-out = render("_TZC_SAVE", {"TOOL": 2, "DRY_RUN": 1})
+out = render_macro("_TZC_SAVE", {"TOOL": 2, "DRY_RUN": 1})
 check("DRY_RUN writes nothing", "SAVE_VARIABLE" not in out)
 check("DRY_RUN still reports", "M118" in out)
 
 # sign convention must match _save_offsets_t1: z = last_result[2] * -1
-out = render("_TZC_SAVE", {"TOOL": 1, "DRY_RUN": 0},
+out = render_macro("_TZC_SAVE", {"TOOL": 1, "DRY_RUN": 0},
              printer_obj(last_result=(0.0, 0.0, 0.0875)))
 check("sign convention negates dz", "VALUE=-0.0875" in out,
       [l for l in lines(out) if "SAVE_VARIABLE" in l])
 
 try:
-    render("_TZC_SAVE", {"TOOL": 1, "DRY_RUN": 0}, printer_obj(last_result=None))
+    render_macro("_TZC_SAVE", {"TOOL": 1, "DRY_RUN": 0}, printer_obj(last_result=None))
     check("missing probe result raises", False, "no error raised")
 except RaisedError:
     check("missing probe result raises", True)
@@ -126,21 +88,21 @@ except RaisedError:
 # ------------------------------------------------- CALIBRATE_TOOL_Z_OFFSETS
 print("CALIBRATE_TOOL_Z_OFFSETS")
 
-full = render("CALIBRATE_TOOL_Z_OFFSETS", {})
+full = render_macro("CALIBRATE_TOOL_Z_OFFSETS", {})
 check("main macro never saves directly", "SAVE_VARIABLE" not in full)
 for tool in (1, 2, 3):
     check("all-run invokes _TZC_SAVE TOOL=%d" % tool,
           re.search(r"_TZC_SAVE\s+TOOL=%d\b" % tool, full) is not None)
 
 for tool in (1, 2, 3):
-    out = render("CALIBRATE_TOOL_Z_OFFSETS", {"TOOL": tool})
+    out = render_macro("CALIBRATE_TOOL_Z_OFFSETS", {"TOOL": tool})
     want = re.search(r"_TZC_SAVE\s+TOOL=%d\b" % tool, out) is not None
     others = [t for t in (1, 2, 3) if t != tool]
     none_other = all(re.search(r"_TZC_SAVE\s+TOOL=%d\b" % o, out) is None for o in others)
     check("TOOL=%d probes only T%d" % (tool, tool), want and none_other)
 
 try:
-    render("CALIBRATE_TOOL_Z_OFFSETS", {"TOOL": 4})
+    render_macro("CALIBRATE_TOOL_Z_OFFSETS", {"TOOL": 4})
     check("bad TOOL raises", False, "no error raised")
 except RaisedError:
     check("bad TOOL raises", True)
@@ -156,7 +118,7 @@ check("homes before the first Tool0",
       "home@%s tool@%s" % (first_home, first_tool))
 
 try:
-    render("CALIBRATE_TOOL_Z_OFFSETS", {}, printer_obj(state="printing"))
+    render_macro("CALIBRATE_TOOL_Z_OFFSETS", {}, printer_obj(state="printing"))
     check("refuses while printing", False, "no error raised")
 except RaisedError:
     check("refuses while printing", True)
@@ -171,7 +133,7 @@ ACTIVATES = re.compile(r"^(Tool\d|ACTIVATE_EXTRUDER)\b")
 MOVES = re.compile(r"^(G0|G1)\s+[XYZ]|^CALIBRATE_MOVE_OVER_PROBE")
 
 for tool in (0, 1, 2, 3):
-    out = render("CALIBRATE_TOOL_Z_OFFSETS", {} if tool == 0 else {"TOOL": tool})
+    out = render_macro("CALIBRATE_TOOL_Z_OFFSETS", {} if tool == 0 else {"TOOL": tool})
     dirty, bad = None, []
     for ln in lines(out):
         if ACTIVATES.match(ln):
@@ -197,13 +159,9 @@ def motion(text):
 
 base = motion(full)
 for tool in (1, 2, 3):
-    got = motion(render("CALIBRATE_TOOL_Z_OFFSETS", {"TOOL": tool}))
+    got = motion(render_macro("CALIBRATE_TOOL_Z_OFFSETS", {"TOOL": tool}))
     diff = [(i, a, b) for i, (a, b) in enumerate(zip(base, got)) if a != b]
     check("TOOL=%d motion identical to full run" % tool,
           got == base, diff[:3] or "len %d vs %d" % (len(base), len(got)))
 
-print()
-if FAILS:
-    print("FAILED: %d" % len(FAILS))
-    sys.exit(1)
-print("PASS")
+sys.exit(_check.report())
