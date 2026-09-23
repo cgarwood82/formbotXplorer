@@ -85,4 +85,30 @@ for macro, want in [("Tool1", 0.16), ("Tool2", -0.0575), ("Tool3", -0.0875)]:
 z = final_z(IQEX, "_MC_TOOL1", pmode=5)
 check("_MC_TOOL1 still applies z1offset", z is not None and abs(z - 0.16) < 1e-9, z)
 
+# --- nothing zeroes the trim back out after it is applied ----------------
+# PRINT_START resets Z before homing, then TANGO_TIME runs Brush_Tool0, whose
+# first command is Tool0 -- so the trim goes live inside TANGO_TIME and has to
+# survive to the print. Probing is immune to it either way: z_tilt, bed_mesh and
+# cartographer's touch home all move in TOOLHEAD coordinates, which bypass
+# gcode_move entirely (TouchHomeMacro sets z via set_z_position(pos.z -
+# trigger_pos) and never reads homing_origin).
+PS = os.path.join(HERE, "..", "config", "Macros", "print_control.cfg")
+ps_printer = printer()
+ps_printer["exclude_object"] = Dotted(objects=[])
+ps_printer["toolhead"] = Dotted(extruder="extruder", homed_axes="xyz",
+                                position=[0.0, 0.0, 10.0, 0.0])
+ps_printer["configfile"] = Dotted(settings={
+    "carriage gantry0": Dotted(position_max=392.0, position_min=77.5),
+    "dual_carriage gantry1": Dotted(position_max=392.0, position_min=-1.0),
+})
+seq = lines(render(PS, "PRINT_START",
+                   dict(BED=80, EXTRUDER=260, INITIAL_TOOL=0,
+                        MIN_Y=218.3, MAX_Y=316.3), ps_printer))
+i_tango = next((i for i, l in enumerate(seq) if l.startswith("TANGO_TIME")), None)
+zeroes_after = [l for l in seq[i_tango + 1:]
+                if re.search(r"SET_GCODE_OFFSET.*\bZ=0\b", l)] if i_tango else []
+check("PRINT_START does not zero Z after TANGO_TIME", not zeroes_after, zeroes_after)
+check("PRINT_START zeroes Z before homing",
+      any(re.search(r"SET_GCODE_OFFSET.*\bZ=0\b", l) for l in seq[:i_tango or 0]))
+
 sys.exit(check.report())
