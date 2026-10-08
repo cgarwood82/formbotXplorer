@@ -6,6 +6,8 @@
 # Install once (sudo is passwordless for systemctl):
 #   sudo systemctl link /home/trans/printer_data/config/0_Xplorer/.9_MCU_Flash/flash-mcus@.service
 # After a deploy changes this file: sudo systemctl daemon-reload
+# Log goes to printer_data/logs (shown in Mainsail); not /var/tmp, where root
+# may not open a file another user owns (sticky dir, fs.protected_regular).
 
 [Unit]
 Description=Flash Klipper MCU firmware (%i)
@@ -15,5 +17,5 @@ Type=oneshot
 User=trans
 # flock: two flashes at once would fight over ~/klipper/.config and out/
 ExecStart=/usr/bin/flock -n /var/tmp/flash_mcus.lock /bin/bash /home/trans/printer_data/config/0_Xplorer/.9_MCU_Flash/scripts/flash_mcus.sh %i
-StandardOutput=truncate:/var/tmp/flash_mcus.log
+StandardOutput=truncate:/home/trans/printer_data/logs/flash_mcus.log
 StandardError=inherit
