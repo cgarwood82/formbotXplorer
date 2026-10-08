@@ -8,8 +8,13 @@
 # - Services: stops Klipper once before flashing, restarts at the end
 #
 # This script relies on per-board .config templates in .9_MCU_Flash/MCU_config
-# and on per-MCU serial declarations in ~/printer_data/config/02__Boards_Serials/*.cfg
+# and on per-MCU serial declarations in ~/printer_data/config/02__Boards_Serials/*.cfg,
+# falling back to the [mcu <name>] section wherever else printer.cfg includes it
+# (AFC writes the Box Turtle's into AFC/AFC_Turtle_1.cfg).
 # Active MCUs are determined from ~/printer_data/config/printer.cfg
+#
+# The Flash_* macros run this through flash-mcus@.service (next to this
+# scripts/ dir) so it survives stopping klipper.service.
 
 set -euo pipefail
 
@@ -29,7 +34,7 @@ DEBUG=0
 
 print_usage() {
   cat <<'USAGE'
-Usage: flash_mcus.sh [options] [mcu_name ...]
+Usage: flash_mcus.sh [options] [mcu_name ... | all]
 
 Options:
   --targets list    Comma-separated list of MCU names to flash (alternative to positional names)
@@ -218,6 +223,12 @@ resolve_board_profile() {
     # Prefer klipper.config for normal flashing
     cfg_path="${MCU_CFG_DIR}/Fysetc_Hexa/klipper.config"
     [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|Fysetc Hexa ${note}"; return 0; }
+  fi
+
+  # Box Turtle (AFC-Lite) -- AFC names it [mcu Turtle_N]
+  if [[ "$name_lc" == *turtle* ]]; then
+    cfg_path="${MCU_CFG_DIR}/AFC_Lite/klipper.config"
+    [[ -f "$cfg_path" ]] && { echo "$cfg_path|ok|AFC-Lite (Box Turtle) ${note}"; return 0; }
   fi
 
   # Fysetc H36
@@ -463,8 +474,48 @@ for f in "${INCLUDED_SERIAL_FILES[@]}"; do
   PARSE_DEBUG_LINES+=("$debug_line")
 done
 
-# If specific targets are provided, use those; else default to active list
-if [[ ${#TARGETS[@]} -eq 0 ]]; then
+# Every [mcu] / [mcu <name>] header in the given files, as "name|file".
+list_mcu_sections() {
+  awk '{ sub(/#.*/, "") }
+       /^[[:space:]]*\[mcu([[:space:]][^]]*)?\][[:space:]]*$/ {
+         s = $0
+         gsub(/^[[:space:]]*\[mcu[[:space:]]*|[[:space:]]*\][[:space:]]*$/, "", s)
+         print (s == "" ? "mcu" : s) "|" FILENAME
+       }' "$@"
+}
+
+# serial:/canbus_uuid: from inside one [mcu <name>] section, as "name|type|id|file".
+parse_mcu_section() {
+  local name="$1" f="$2" hdr
+  [[ "$name" == "mcu" ]] && hdr="[mcu]" || hdr="[mcu $name]"
+  awk -v hdr="$hdr" -v name="$name" -v file="$f" '
+    { sub(/#.*/, "") }
+    /^[[:space:]]*\[/ { s = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); insec = (s == hdr); next }
+    insec && /^[[:space:]]*(serial|canbus_uuid)[[:space:]]*:/ {
+      key = $0; sub(/[[:space:]]*:.*/, "", key); gsub(/[[:space:]]/, "", key)
+      val = $0; sub(/^[^:]*:[[:space:]]*/, "", val); sub(/[[:space:]]+$/, "", val)
+      print name "|" (key == "serial" ? "serial" : "canbus") "|" val "|" file
+      exit
+    }' "$f"
+}
+
+# MCUs declared outside the serials dir -- e.g. AFC writes [mcu Turtle_1]
+# into AFC/AFC_Turtle_1.cfg. A serials-dir declaration always wins.
+while IFS='|' read -r name src; do
+  [[ -n "$name" && -z "${MCU_TYPE[$name]:-}" ]] || continue
+  line=$(parse_mcu_section "$name" "$src" || true)
+  [[ -n "$line" ]] || continue
+  IFS='|' read -r name type id file <<< "$line"
+  MCU_TYPE["$name"]="$type"
+  MCU_ID["$name"]="$id"
+  MCU_CFGFILE["$name"]="$file"
+  MCU_SOURCE["$name"]="$file"
+  ACTIVE_MCU_LIST+=("$name")
+  PARSE_DEBUG_LINES+=("$file => name=$name type=$type id=$id (outside ${SERIALS_DIR})")
+done < <((( ${#RESOLVED_CFGS[@]} )) && list_mcu_sections "${RESOLVED_CFGS[@]}")
+
+# If specific targets are provided, use those; else (or for "all") the active list
+if [[ ${#TARGETS[@]} -eq 0 || " ${TARGETS[*]} " == *" all "* ]]; then
   TARGETS=("${ACTIVE_MCU_LIST[@]}")
 fi
 
@@ -546,7 +597,7 @@ for name in "${TARGETS[@]}"; do
     continue
   fi
   if [[ -z "${MCU_TYPE[$name]:-}" ]]; then
-    PLAN_ROWS+=("$name|skip|no serial cfg found in ${SERIALS_DIR}")
+    PLAN_ROWS+=("$name|skip|no [mcu] section with serial/canbus_uuid found for it")
     continue
   fi
   prof=$(resolve_board_profile "$name" "${MCU_TYPE[$name]}" "${MCU_ID[$name]}" "${MCU_CFGFILE[$name]}")

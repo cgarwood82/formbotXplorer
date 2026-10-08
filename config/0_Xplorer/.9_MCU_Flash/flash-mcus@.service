@@ -1,0 +1,19 @@
+# Runs scripts/flash_mcus.sh outside klipper.service. The script stops Klipper
+# while it flashes; started from a Klipper shell command it would be killed
+# along with klippy. The Flash_* macros start this with
+# `sudo systemctl start --no-block flash-mcus@<mcu name or "all">`.
+#
+# Install once (sudo is passwordless for systemctl):
+#   sudo systemctl link /home/trans/printer_data/config/0_Xplorer/.9_MCU_Flash/flash-mcus@.service
+# After a deploy changes this file: sudo systemctl daemon-reload
+
+[Unit]
+Description=Flash Klipper MCU firmware (%i)
+
+[Service]
+Type=oneshot
+User=trans
+# flock: two flashes at once would fight over ~/klipper/.config and out/
+ExecStart=/usr/bin/flock -n /var/tmp/flash_mcus.lock /bin/bash /home/trans/printer_data/config/0_Xplorer/.9_MCU_Flash/scripts/flash_mcus.sh %i
+StandardOutput=truncate:/var/tmp/flash_mcus.log
+StandardError=inherit
