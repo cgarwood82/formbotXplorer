@@ -1,0 +1,19 @@
+diff --git a/extras/AFC_led.py b/extras/AFC_led.py
+index b843696..2bbff1d 100644
+--- a/extras/AFC_led.py
++++ b/extras/AFC_led.py
+@@ -116,7 +116,13 @@ class AFCled:
+         def reactor_bgfunc(eventtime):
+             with self.mutex:
+                 self.update_color_data(led_state)
+-                self.send_data(print_time)
++                # Klipper's LEDHelper guards its own callback the same way. Unguarded,
++                # a send to a shut-down MCU (M112, MCU error) escapes the reactor with
++                # "Unable to obtain 'neopixel_result' response" and hangs klippy.
++                try:
++                    self.send_data(print_time)
++                except self.printer.command_error:
++                    logging.exception("AFC led update transmit error")
+         self.printer.get_reactor().register_callback(reactor_bgfunc)
+ 
+     def get_status(self, eventtime=None):

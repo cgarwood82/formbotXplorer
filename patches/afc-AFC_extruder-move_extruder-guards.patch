@@ -1,0 +1,143 @@
+diff --git a/extras/AFC_extruder.py b/extras/AFC_extruder.py
+index 40e3fac..3e2f40c 100644
+--- a/extras/AFC_extruder.py
++++ b/extras/AFC_extruder.py
+@@ -802,51 +802,116 @@ class AFCExtruder:
+         if distance == 0:
+             return
+ 
+-        # TODO: put a guard here as well to check if loading is active
+         # TODO: make sync work correctly
+ 
+-        self.load_active = True
+         toolhead: ToolHead = self.printer.lookup_object("toolhead")
++
++        # Klipper drives the active extruder's stepper from the toolhead's own trapq. Detaching
++        # it here would race any in-flight `G1 E` move on that trapq and desynchronise the
++        # stepper's commanded position, which klipper reports as "Internal error in
++        # stepcompress". Only a parked toolhead's extruder is safe to borrow.
++        if toolhead.get_extruder() is self.toolhead_extruder:
++            self.logger.error(
++                f"{self.th_extruder_name} is the active extruder, refusing to move it "
++                "asynchronously.\nSelect a different tool, or extrude with the printer idle."
++            )
++            return
++
++        # Being idle is not the same as being unfed. `SYNC_EXTRUDER_MOTION EXTRUDER=extruder2
++        # MOTION_QUEUE=extruder` binds our stepper to *another* extruder's trapq (klipper
++        # `ExtruderStepper.sync_to_extruder` -> `set_trapq(extruder.get_trapq())`), which is
++        # what IDEX copy/mirror printing does for the secondary toolheads. That queue's owner
++        # keeps appending moves while we are not the active extruder, so the check above lets
++        # it through -- and stealing the stepper then collides with the owner's step
++        # generation, which klipper reports as "Error in syncemitter '<name>'".
++        #
++        # Syncing to our *own* queue is the ordinary parked state (a normal print syncs every
++        # extruder to itself) and is the legitimate case this async path exists for, so it
++        # stays allowed; the active-extruder check above is what covers it when it is in use.
++        motion_queue = self.toolhead_extruder.extruder_stepper.motion_queue
++        if motion_queue is not None and motion_queue != self.th_extruder_name:
++            self.logger.error(
++                f"{self.th_extruder_name} is synced to '{motion_queue}', refusing to move it "
++                "asynchronously.\nUnsync it first (SYNC_EXTRUDER_MOTION "
++                f"EXTRUDER={self.th_extruder_name} MOTION_QUEUE=) or leave copy/mirror mode."
++            )
++            return
++
++        self.load_active = True
+         stepper = self.toolhead_extruder.extruder_stepper.stepper
+ 
++        # Step generation must be quiesced before rebinding a stepper's kinematics, trapq or
++        # position. Mirrors klipper's force_move.manual_move and AFC_stepper._move.
++        toolhead.flush_step_generation()
+         self.prev_sk = stepper.set_stepper_kinematics(self.stepper_kinematics)
+         self.prev_trapq = stepper.set_trapq(self.trapq)
+         stepper.set_position((0., 0., 0.))
+ 
+-        axis_r, accel_t, cruise_t, cruise_v = calc_move_time(distance, self.tool_load_speed, 5)
+-        print_time = toolhead.get_last_move_time()
+-        self.trapq_append(self.trapq, print_time, accel_t, cruise_t, accel_t,
+-                          0., 0., 0., axis_r, 0., 0., 0., cruise_v, 5)
+-        print_time = print_time + accel_t + cruise_t + accel_t
+-
+-        if self.motion_queuing is None:
+-            stepper.generate_steps(print_time)
+-            self.trapq_finalize_moves(self.trapq, print_time + LARGE_TIME_OFFSET,
+-                                    print_time + LARGE_TIME_OFFSET)
+-            toolhead.note_mcu_movequeue_activity(print_time)            # type: ignore
+-        else:
+-            self.motion_queuing.note_mcu_movequeue_activity(print_time)
++        try:
++            axis_r, accel_t, cruise_t, cruise_v = calc_move_time(distance, self.tool_load_speed, 5)
++            dwell_time = accel_t + cruise_t + accel_t
++            print_time = toolhead.get_last_move_time()
++            self.trapq_append(self.trapq, print_time, accel_t, cruise_t, accel_t,
++                              0., 0., 0., axis_r, 0., 0., 0., cruise_v, 5)
++            print_time = print_time + dwell_time
++
++            if self.motion_queuing is None:
++                stepper.generate_steps(print_time)
++                self.trapq_finalize_moves(self.trapq, print_time + LARGE_TIME_OFFSET,
++                                        print_time + LARGE_TIME_OFFSET)
++                toolhead.note_mcu_movequeue_activity(print_time)            # type: ignore
++            else:
++                self.motion_queuing.note_mcu_movequeue_activity(print_time)
+ 
+-        dwell_time = accel_t + cruise_t + accel_t
++            # Reserve the print-time window so the toolhead cannot schedule moves onto the
++            # extruder trapq while our move is still executing.
++            toolhead.dwell(dwell_time)
++        except Exception:
++            # Never leave the toolhead's stepper attached to our private trapq.
++            self.restore_toolhead_stepper()
++            self.load_active = False
++            raise
+ 
+         self.reactor.update_timer(self.extruder_move_timer,
+                                   self.reactor.monotonic() + ceil(dwell_time))
+ 
+-    def extruder_move_cb(self, eventtime: float) -> float:
++    def restore_toolhead_stepper(self) -> None:
+         """
+-        Extruder move callback that is called after scheduling moves in `move_extruder` function,
+-        this function put back extruder steppers motion queue and disables extruder stepper
+-
+-        :param eventtime: Event time when callback function is called, currently not used
+-        :return float: Always returns reactor NEVER to stop function from being called again
++        Hands the toolhead extruder's stepper back to the toolhead, undoing the rebinding done
++        by `move_extruder`. Safe to call when no move is outstanding.
+         """
++        if self.prev_trapq is None and self.prev_sk is None:
++            return
++
+         toolhead: ToolHead = self.printer.lookup_object("toolhead")
+         stepper = self.toolhead_extruder.extruder_stepper.stepper
+         toolhead.flush_step_generation()
+         stepper.set_trapq(self.prev_trapq)
+         stepper.set_stepper_kinematics(self.prev_sk)
++
++        # `move_extruder` zeroed this stepper to run the move in its own coordinate space,
++        # so it is now sitting at the move distance while the extruder still believes it is
++        # at `last_position`. Nothing else reconciles the two: ACTIVATE_EXTRUDER calls
++        # `toolhead.set_extruder(self, self.last_position)` and `set_extruder` only assigns
++        # `commanded_pos[3]` -- it never touches the stepper. Left alone the difference is
++        # billed as a step discontinuity at the next flush, which is why the damage can sit
++        # dormant and surface minutes later at an unrelated tool change. Mirrors klipper's
++        # own `ExtruderStepper.sync_to_extruder`.
++        stepper.set_position((self.toolhead_extruder.last_position, 0., 0.))
++
+         if self.motion_queuing is not None:
+             self.motion_queuing.wipe_trapq(self.trapq)
++        self.prev_sk = self.prev_trapq = None
++
++    def extruder_move_cb(self, eventtime: float) -> float:
++        """
++        Extruder move callback that is called after scheduling moves in `move_extruder` function,
++        this function put back extruder steppers motion queue and disables extruder stepper
++
++        :param eventtime: Event time when callback function is called, currently not used
++        :return float: Always returns reactor NEVER to stop function from being called again
++        """
++        self.restore_toolhead_stepper()
+ 
+         self.function.do_enable(False, self.th_extruder_name)
+         self.load_active = False

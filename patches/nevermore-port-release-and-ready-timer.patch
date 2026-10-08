@@ -1,0 +1,72 @@
+diff --git a/klipper/nevermore.py b/klipper/nevermore.py
+index 9b9b6eb..39581b7 100644
+--- a/klipper/nevermore.py
++++ b/klipper/nevermore.py
+@@ -661,7 +661,15 @@ class NevermoreSerial(NevermoreBackground):
+             try:
+                 if (transport := mk_transport()) is not None:
+                     self.log.info(f"connected to controller")
+-                    await self._worker_using(transport)
++                    try:
++                        await self._worker_using(transport)
++                    finally:
++                        # The port is opened `exclusive`. Leaving it to GC means a
++                        # klipper RESTART can't reopen it within the connect timeout.
++                        try:
++                            await transport.close()
++                        except Exception:
++                            self.log.exception("failed to close transport")
+                 elif not await self._reconnect_retry(connection_start):
+                     break
+             except OSError as e:
+@@ -890,6 +898,13 @@ class Nevermore:
+         self.printer.register_event_handler(
+             "gcode:request_restart", lambda t: self._handle_shutdown()
+         )
++        # gcode:request_restart only fires when the printer is ready. A restart
++        # from an error/shutdown state skips it, the old worker keeps the
++        # exclusive serial port, and the next start times out connecting.
++        # klippy:disconnect is sent at the end of every run.
++        self.printer.register_event_handler(
++            "klippy:disconnect", self._handle_disconnect
++        )
+ 
+         reactor = self.printer.get_reactor()
+         self._timer_vent_servo_release_handle = reactor.register_timer(
+@@ -983,6 +998,14 @@ class Nevermore:
+             self._printing = printing
+             self.send_printing_state_commands(printing)
+ 
++    def _handle_disconnect(self) -> None:
++        # Must not raise: klippy runs the remaining disconnect handlers
++        # (including the MCUs') in the same list comprehension.
++        try:
++            self._interface.disconnect()
++        except Exception:
++            LOG.exception("disconnect on klippy:disconnect failed")
++
+     def _handle_shutdown(self):
+         self.send_printing_state_commands(False)  # release fan control & calibration
+         self._interface.disconnect()
+@@ -1224,7 +1247,11 @@ class NevermoreGlobal:
+             gcode.register_mux_command(cmd, "NEVERMORE", None, go, desc=desc)
+ 
+         printer.register_event_handler("klippy:ready", self._handle_ready)
+-        reactor.register_timer(self._check_heaters, reactor.NOW)
++        # Started from `_handle_ready`: the check looks up `heater_bed`, which may
++        # not be loaded yet if the reactor runs timers during config load.
++        self._check_heaters_timer = reactor.register_timer(
++            self._check_heaters, reactor.NEVER
++        )
+ 
+     def cmd_NEVERMORE_TEMPERATURE_WAIT(self, gcmd: GCodeCommand) -> None:
+         min_temp: float = gcmd.get_float('MINIMUM', default=float('-inf'))
+@@ -1281,6 +1308,8 @@ class NevermoreGlobal:
+             for name in heaters.get_all_heaters()
+             if self.EXTRUDER_HEATER_REGEX.fullmatch(name)
+         ]
++        reactor = self.printer.get_reactor()
++        reactor.update_timer(self._check_heaters_timer, reactor.NOW)
+ 
+     def _check_heaters(self, eventtime: float) -> float:
+         hotends_active = any(heater.target_temp for heater in self._heaters)
